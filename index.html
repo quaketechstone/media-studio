@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#ffffff">
 <meta name="media-api-base" content="">
 <!-- 版本号由 scripts/version.mjs 写入，页面徽章与发布日志读同一份，避免"站点写 0.1、包是 0.2" -->
-<meta name="app-version" content="0.4.1">
+<meta name="app-version" content="0.5.0">
 <meta name="description" content="YouTube Media Studio：字幕导入、编辑、分段翻译与导出的本地工作台">
 <title>YouTube Media Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
@@ -142,6 +142,32 @@
       <progress id="download-progress" class="transfer" max="100" value="0" hidden></progress>
       <p id="download-status" class="hint">官方播放器不提供视频文件下载接口。此处的下载依赖自托管执行器；没有执行器时，请用下面的本地媒体导入。</p>
 
+      <details id="cli-block" class="cli-block">
+        <summary>方式二：在你自己的电脑上下载（零后端，网页不发任何请求）</summary>
+        <div class="cli-body">
+          <div class="media-row">
+            <label class="field compact"><span>清晰度</span>
+              <select id="cli-quality">
+                <option value="best">最佳画质</option>
+                <option value="1080">≤ 1080p</option>
+                <option value="720">≤ 720p</option>
+                <option value="audio">仅音频</option>
+              </select>
+            </label>
+            <label class="field compact"><span>字幕</span>
+              <select id="cli-subs">
+                <option value="manual">原生字幕</option>
+                <option value="auto">含自动生成</option>
+                <option value="none">不要字幕</option>
+              </select>
+            </label>
+            <button id="cli-copy" class="btn btn-secondary" type="button" disabled>复制命令</button>
+          </div>
+          <pre id="cli-command" class="cli-command">先在上面粘贴并解析视频链接</pre>
+          <p id="cli-status" class="hint">命令只在你自己的终端执行。需要先安装 yt-dlp（pip install -U yt-dlp，或下载单文件二进制）。</p>
+        </div>
+      </details>
+
       <div class="media-row">
         <label class="btn btn-secondary btn-file" for="local-file">导入本地视频 / 音频</label>
         <input id="local-file" class="sr-only" type="file" accept="video/*,audio/*">
@@ -246,7 +272,7 @@
 
 <footer>
   <span id="core-note">Rust / WebAssembly · 独立子应用</span>
-  <span id="app-version" class="version-tag">v0.4.1</span>
+  <span id="app-version" class="version-tag">v0.5.0</span>
   <a href="../../" id="back-link">返回主站</a>
 </footer>
 

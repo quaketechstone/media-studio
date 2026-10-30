@@ -449,6 +449,38 @@ progress.transfer::-webkit-progress-bar { background: var(--border); }
 progress.transfer::-webkit-progress-value { background: var(--accent); }
 progress.transfer::-moz-progress-bar { background: var(--accent); }
 
+/* 本机命令：它是"零后端下载"的唯一实现方式，说明必须和命令一起显示 */
+.cli-block {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.cli-block > summary {
+  padding: 12px 14px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+}
+.cli-block > summary::marker { color: var(--muted); }
+.cli-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.cli-command {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ---------------------------------------------------------------- 附件 */
 
 .context-block {

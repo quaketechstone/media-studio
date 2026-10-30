@@ -58,6 +58,7 @@ import {
 import { NOTES_SCHEMA, buildNotes, serializeNotes, notesFilename, cuesForNotes, segmentsForNotes } from "./notes.js";
 import { openSink, pickerAvailable, sinkWarning, SinkError, BLOB_WARN_BYTES } from "./sink.js";
 import { SpeedMeter, formatEta } from "./speed.js";
+import { buildDownloadCommand, describeFollowUp, CommandError } from "./cli.js";
 import { MediaBackend, BackendError, emptyCapabilities } from "./backends/base.js";
 import { ExecutorBackend } from "./backends/executor_backend.js";
 import { CustomInstanceBackend, parseInstanceUrl, resolveSameOrigin } from "./backends/custom_instance_backend.js";
@@ -224,6 +225,10 @@ export {
   BLOB_WARN_BYTES,
   SpeedMeter,
   formatEta,
+  // 零后端：生成本机下载命令（不发任何请求）
+  buildDownloadCommand,
+  describeFollowUp,
+  CommandError,
   // 零后端能力：本地媒体、来源标注、笔记素材
   LocalMediaSession,
   MediaError,

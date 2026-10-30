@@ -27,6 +27,8 @@ import {
   buildNotes,
   serializeNotes,
   notesFilename,
+  buildDownloadCommand,
+  describeFollowUp,
 } from "./youtube/index.js";
 import { extractFile, buildContextBlock, imageAttachments } from "./file_context.js";
 import { buildTranslationPrompt } from "./prompt.js";
@@ -818,6 +820,50 @@ function renderVideo(video) {
       $("video-sub").textContent = [state.player && meta?.author, formatDuration(duration)].filter(Boolean).join(" · ");
     }
   });
+  renderCliCommand(video);
+}
+
+/**
+ * 生成"在你自己电脑上下载"的命令。
+ *
+ * 这是零后端下载的唯一实现方式：浏览器的同源策略不允许页面读取 googlevideo 的字节
+ * （WASM 也绕不过，它没有独立网络栈），所以下载必须发生在用户自己的机器上。
+ * 网页只拼命令，不发请求、不读 cookie、不写盘。
+ */
+function renderCliCommand(video = state.video) {
+  const box = $("cli-command");
+  const button = $("cli-copy");
+  if (!video?.canonicalUrl) {
+    box.textContent = "先在上面粘贴并解析视频链接";
+    button.disabled = true;
+    return;
+  }
+  const quality = $("cli-quality").value;
+  const subs = $("cli-subs").value;
+  try {
+    box.textContent = buildDownloadCommand({ url: video.canonicalUrl, quality, subs });
+    button.disabled = false;
+    $("cli-status").textContent = describeFollowUp({ subs });
+  } catch (error) {
+    box.textContent = error.message;
+    button.disabled = true;
+  }
+}
+
+async function copyCliCommand() {
+  const text = $("cli-command").textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    $("cli-status").textContent = "已复制。在你自己的终端里粘贴执行，下载完把文件拖回下面的导入区。";
+  } catch {
+    // 非 HTTPS 或用户拒绝剪贴板权限：选中文本，让用户自己按 Ctrl+C，不假装成功
+    const range = document.createRange();
+    range.selectNodeContents($("cli-command"));
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    $("cli-status").textContent = "浏览器不允许直接写剪贴板，命令已选中，请按 Ctrl+C / ⌘C 复制。";
+  }
 }
 
 async function resolveVideo() {
@@ -1423,6 +1469,10 @@ function bindEvents() {
   $("download-start").addEventListener("click", downloadMedia);
   $("download-mode").addEventListener("change", fillFormatOptions);
   $("download-cancel").addEventListener("click", () => state.downloadJob?.cancel());
+  // 零后端下载：只拼命令，任何选择变化都不发请求
+  $("cli-quality").addEventListener("change", () => renderCliCommand());
+  $("cli-subs").addEventListener("change", () => renderCliCommand());
+  $("cli-copy").addEventListener("click", copyCliCommand);
 
   // 媒体通道：默认执行器；自定义实例必须显式保存并检测，不静默生效
   $("backend-select").addEventListener("change", () => {
