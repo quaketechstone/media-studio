@@ -6,7 +6,10 @@
  */
 import { initCore, getCore, getCoreInfo } from "./core.js";
 import { LLMModule, DEFAULT_SYSTEM_PROMPT } from "../lib/llm-module/index.js";
-import { readSubtitleFile, looksBinary, downloadText, suggestFilename } from "./subtitle_io.js";
+import { downloadText, suggestFilename } from "./subtitle_io.js";
+import { extractSource } from "./document_source.js";
+import { buildExport, documentToMarkdown, plainTextToMarkdown, stemOf } from "./exporters/index.js";
+import { renderMarkdown } from "./markdown.js";
 import { TranslationTask, TaskState } from "./task_runner.js";
 import {
   YouTubeService,
@@ -47,6 +50,9 @@ const state = {
   localMedia: null,
   context: [],
   sourceName: "subtitles",
+  sourceKind: "subtitle",
+  model: "",
+  outputView: "source",
 };
 
 // ---------------------------------------------------------------- 小工具
@@ -99,9 +105,15 @@ function renderDocStats() {
   const text = core.serializeSubtitles(doc, doc.format);
   const bytes = core.utf8ByteLen(text);
   const cueCount = doc.cues.length;
-  setPill("doc-stats", `${cueCount} 条 · ${formatBytes(bytes)}`);
+  // 文档（txt）没有 cue，显示"0 条字幕"会让用户以为导入失败
+  const isDocument = cueCount === 0 && doc.format === "txt";
+  setPill(
+    "doc-stats",
+    isDocument ? `${(doc.text || "").length} 字符 · ${formatBytes(bytes)}` : `${cueCount} 条 · ${formatBytes(bytes)}`,
+  );
   $("doc-format").textContent =
-    `${doc.format.toUpperCase()}${cueCount ? ` · ${cueCount} 条字幕` : ""}${bytes >= 5000 ? " · 将分段翻译" : " · 全文翻译"}`;
+    `${doc.format.toUpperCase()}${isDocument ? " · 文档（无时间轴）" : cueCount ? ` · ${cueCount} 条字幕` : ""}` +
+    `${bytes >= 5000 ? " · 将分段翻译" : " · 全文翻译"}`;
   const plan = core.segmentSubtitles(doc, Number($("segment-count").value));
   state.plan = plan;
   renderPlan(plan);
@@ -171,6 +183,9 @@ function applyParsed(text, hint) {
       $("translation-output").value = "";
       $("output-stats").textContent = "—";
       setPill("translation-status", "就绪");
+      resetLiveOutput();
+      hide("live-block");
+      if (state.outputView === "preview") renderPreview();
     }
     setNotice("source-warnings", (doc.warnings || []).join("\n"), "warning");
     renderDocStats();
@@ -189,16 +204,20 @@ async function loadSubtitleFile(file) {
   const zone = $("drop-zone");
   zone.classList.add("busy");
   try {
-    const result = await readSubtitleFile(file);
-    if (looksBinary(result.text)) throw new Error("文件看起来是二进制内容，不是文本字幕");
+    const result = await extractSource(file);
     $("raw-subtitles").value = result.text;
     state.sourceName = file.name;
+    state.sourceKind = result.kind;
     state.version += 1;
     const ok = applyParsed(result.text, result.hint);
     if (ok) {
       const notes = [...result.warnings];
       notes.unshift(`已载入 ${file.name}（${result.encoding}，${formatBytes(result.bytes)}）`);
-      setNotice("source-warnings", notes.join("\n"), result.warnings.length ? "warning" : "success");
+      if (result.kind === "document") {
+        notes.push("这是文档内容：没有时间轴，按段落翻译；SRT / VTT 导出不可用，请用 TXT / MD / HTML / DOCX / PDF。");
+      }
+      const level = result.warnings.length || result.kind === "document" ? "warning" : "success";
+      setNotice("source-warnings", notes.join("\n"), level);
     }
   } catch (error) {
     setNotice("source-warnings", `读取失败：${error.message}`, "error");
@@ -216,16 +235,25 @@ function syncButtons() {
   $("stop-translation").disabled = !running;
   $("retry-translation").disabled = running || (state.task?.failedCount ?? 0) === 0;
   const hasOutput = Boolean($("translation-output").value.trim());
-  ["export-srt", "export-vtt", "export-txt", "copy-result"].forEach((id) => {
+  ["export-srt", "export-vtt", "export-txt", "export-document", "copy-result"].forEach((id) => {
     $(id).disabled = !hasOutput;
   });
+  // 文档没有时间轴时，SRT/VTT 必然导不出来：提前禁用并说明，比点了再报错好
+  const hasTimeline = Boolean(state.doc?.cues?.length);
+  $("export-srt").disabled = !hasOutput || !hasTimeline;
+  $("export-vtt").disabled = !hasOutput || !hasTimeline;
 }
 
 // ---------------------------------------------------------------- 翻译
 
 function buildPrompt(segmentText, targetLanguage) {
   const context = buildContextBlock(state.context);
-  return buildTranslationPrompt({ segmentText, targetLanguage, contextText: context.text });
+  return buildTranslationPrompt({
+    segmentText,
+    targetLanguage,
+    contextText: context.text,
+    instruction: $("extra-instruction").value,
+  });
 }
 
 async function startTranslation() {
@@ -247,6 +275,10 @@ async function startTranslation() {
   const versionAtStart = state.version;
   const targetLanguage = $("target-lang").value;
   const images = imageAttachments(state.context);
+  const model = state.model || undefined;
+
+  resetLiveOutput();
+  show("live-block");
 
   const task = new TranslationTask({
     segments: plan.segments,
@@ -254,7 +286,12 @@ async function startTranslation() {
     request: (text, ctx) =>
       llm.stream(buildPrompt(text, targetLanguage), {
         signal: ctx.signal,
-        onChunk: ctx.onChunk,
+        // 模型是每次请求的参数，不是全局配置：同一 API 下可随时换
+        model,
+        onChunk: (chunk) => {
+          ctx.onChunk(chunk);
+          appendLiveOutput(chunk);
+        },
         attachments: images,
       }),
     onEvent: (event) => renderTask(event, plan),
@@ -278,6 +315,10 @@ function renderTask(event, plan) {
     row.querySelector(".seg-meta").textContent =
       seg.state === "failed" && seg.error ? seg.error : stateLabel(seg.state) + (seg.attempts > 1 ? ` · 第 ${seg.attempts} 次尝试` : "");
   });
+  const active = plan.segments.findIndex((_, i) => snapshot.segments[i]?.state === "running");
+  if (active >= 0) $("live-meta").textContent = `第 ${active + 1}/${snapshot.total} 段`;
+  else if (snapshot.state !== "running") $("live-meta").textContent = `${stateLabel(snapshot.state)} · ${snapshot.total} 段`;
+
   setPill(
     "translation-status",
     snapshot.state === "running"
@@ -313,6 +354,7 @@ function finishTask(snapshot, plan, target) {
   buildContextBlock(state.context).warnings.forEach((w) => notes.push(w));
   setNotice("source-warnings", notes.join("\n"), snapshot.state === "done" ? "success" : "warning");
   setPill("translation-status", stateLabel(snapshot.state), snapshot.state === "done" ? "ok" : snapshot.state === "failed" ? "err" : "");
+  if (state.outputView === "preview") renderPreview();
   syncButtons();
 }
 
@@ -340,6 +382,214 @@ function exportAs(format) {
     }
   }
   downloadText(output, suggestFilename(state.sourceName, format), MIME[format]);
+}
+
+// ---------------------------------------------------------------- 模型选择
+
+/**
+ * 一个 API 往往暴露多个模型（同一个 key 既能调快模型也能调强模型）。
+ * 配置里的 model 只是**默认值**，翻译区这里选择的是**本次请求**用的模型：
+ * 只记在 localStorage，不写回配置，避免"临时换个模型试一下"把默认值改坏。
+ */
+const modelCacheKey = (id) => `yms.models.${id}`;
+const modelChoiceKey = (id) => `yms.model.${id}`;
+
+function readModelCache(id) {
+  try {
+    const list = JSON.parse(localStorage.getItem(modelCacheKey(id)) || "[]");
+    return Array.isArray(list) ? list.filter((item) => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeModelCache(id, ids) {
+  try {
+    localStorage.setItem(modelCacheKey(id), JSON.stringify([...new Set(ids)].sort()));
+  } catch {
+    // 隐私模式下写不进去不影响本次使用
+  }
+}
+
+function renderModelOptions(models = null) {
+  const config = llm.getActiveConfig();
+  const select = $("model-select");
+  const ids = new Set([config.model, ...readModelCache(config.id), ...(models || [])].filter(Boolean));
+  const remembered = localStorage.getItem(modelChoiceKey(config.id)) || "";
+
+  select.replaceChildren(new Option(`配置默认（${config.model}）`, ""));
+  [...ids].sort().forEach((id) => select.add(new Option(id === config.model ? `${id} · 默认` : id, id)));
+  select.value = remembered && ids.has(remembered) ? remembered : "";
+  state.model = select.value;
+
+  $("model-hint").textContent =
+    ids.size > 1
+      ? `当前接口有 ${ids.size} 个候选模型；切换只影响本次翻译，不改配置默认值。`
+      : "同一 API 有多个模型时，点「刷新模型」从 /models 拉取列表后可直接切换。";
+}
+
+function selectModel(value) {
+  const config = llm.getActiveConfig();
+  state.model = value;
+  try {
+    if (value) localStorage.setItem(modelChoiceKey(config.id), value);
+    else localStorage.removeItem(modelChoiceKey(config.id));
+  } catch {
+    // 存不下就只影响下次是否记住，不影响本次请求
+  }
+  $("model-hint").textContent = value
+    ? `本次翻译使用 ${value}（不修改配置默认值）。`
+    : `使用配置默认模型 ${config.model}。`;
+}
+
+async function refreshModels() {
+  const button = $("refresh-models");
+  if (!llm.hasApiKey()) {
+    openConfig("先配置 API Key，才能从接口拉取模型列表。");
+    return;
+  }
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "获取中…";
+  try {
+    const config = llm.getActiveConfig();
+    const models = await llm.listModels();
+    const ids = models.map((item) => item.id);
+    writeModelCache(config.id, ids);
+    renderModelOptions(ids);
+    button.textContent = `已获取 ${ids.length}`;
+  } catch (error) {
+    button.textContent = "获取失败";
+    $("model-hint").textContent =
+      `拉取失败：${error.message}${error.detail ? ` · ${error.detail}` : ""}` +
+      " 可在配置弹窗里直接手填模型名，不影响翻译。";
+  } finally {
+    setTimeout(() => {
+      button.textContent = original;
+      button.disabled = false;
+    }, 1600);
+  }
+}
+
+// ---------------------------------------------------------------- 实时输出 / 预览
+
+let liveBuffer = "";
+let liveFrame = 0;
+
+function resetLiveOutput() {
+  liveBuffer = "";
+  if (liveFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(liveFrame);
+  liveFrame = 0;
+  $("live-output").textContent = "";
+  $("live-meta").textContent = "";
+}
+
+/** 流式片段按帧合并写 DOM：每个 token 都写一次会在长段落上把主线程拖住。 */
+function appendLiveOutput(chunk) {
+  liveBuffer += chunk;
+  if (liveFrame) return;
+  const flush = () => {
+    liveFrame = 0;
+    const el = $("live-output");
+    el.textContent = liveBuffer;
+    el.scrollTop = el.scrollHeight;
+  };
+  if (typeof requestAnimationFrame === "function") liveFrame = requestAnimationFrame(flush);
+  else flush();
+}
+
+function setOutputView(view) {
+  state.outputView = view === "preview" ? "preview" : "source";
+  const preview = state.outputView === "preview";
+  $("translation-output").classList.toggle("hidden", preview);
+  $("translation-preview").classList.toggle("hidden", !preview);
+  $("preview-note").classList.toggle("hidden", !preview);
+  $("view-source").classList.toggle("is-active", !preview);
+  $("view-preview").classList.toggle("is-active", preview);
+  $("view-source").setAttribute("aria-selected", String(!preview));
+  $("view-preview").setAttribute("aria-selected", String(preview));
+  if (preview) renderPreview();
+}
+
+function currentTitle() {
+  if (state.video?.meta?.title) return state.video.meta.title;
+  // 没导入过文件时 sourceName 是占位值，不能把它当标题导出去
+  const stem = state.sourceName && state.sourceName !== "subtitles" ? stemOf(state.sourceName) : "";
+  return stem || "译文";
+}
+
+/** 预览与导出共用：优先按字幕结构转成带时间轴的 Markdown，失败才按纯文本。 */
+function previewMarkdown() {
+  const text = $("translation-output").value;
+  try {
+    const doc = getCore().parseSubtitles(text, state.doc?.format || "txt");
+    if (doc.cues?.length) return documentToMarkdown({ doc, title: currentTitle() });
+  } catch {
+    // 用户编辑到一半或纯文本内容：落到下面的纯文本路径
+  }
+  return plainTextToMarkdown(text, { title: currentTitle() });
+}
+
+function renderPreview() {
+  const box = $("translation-preview");
+  if (!$("translation-output").value.trim()) {
+    box.innerHTML = '<p class="hint">还没有译文。翻译完成或手动输入后即可预览。</p>';
+    return;
+  }
+  box.innerHTML = renderMarkdown(previewMarkdown());
+}
+
+// ---------------------------------------------------------------- 文档格式导出
+
+function exportDocument() {
+  const text = $("translation-output").value;
+  if (!text.trim()) return;
+  const format = $("export-format").value;
+  const model = state.model || llm.getActiveConfig().model;
+
+  // 以内容区的当前文本为准（用户可能手工改过），解析不了就当纯文本，绝不拿原文顶替
+  let doc = null;
+  try {
+    const parsed = getCore().parseSubtitles(text, state.doc?.format || "txt");
+    if (parsed.cues?.length) doc = parsed;
+  } catch {
+    doc = null;
+  }
+
+  try {
+    const result = buildExport({
+      format,
+      doc,
+      text,
+      title: currentTitle(),
+      source: state.sourceName,
+      model,
+    });
+    if (result.printHtml) {
+      openPrintView(result.printHtml);
+      $("export-status").textContent = `已打开打印视图：在打印对话框选择「另存为 PDF」，建议文件名 ${result.filename}`;
+      return;
+    }
+    if (result.bytes) {
+      saveBlob(new Blob([result.bytes], { type: result.mime }), result.filename);
+    } else {
+      downloadText(result.text, result.filename, result.mime);
+    }
+    $("export-status").textContent = `已导出 ${result.filename}`;
+  } catch (error) {
+    setNotice("source-warnings", `导出失败：${error.message}`, "error");
+  }
+}
+
+function openPrintView(html) {
+  const win = window.open("", "_blank");
+  if (!win) {
+    setNotice("source-warnings", "浏览器拦截了新窗口。请允许本页弹出窗口后重试，或先导出 HTML 再打印。", "error");
+    return;
+  }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
 }
 
 // ---------------------------------------------------------------- 媒体能力
@@ -658,13 +908,13 @@ async function importSubtitleFile(file) {
   if (!file) return;
   $("import-status").textContent = `正在读取 ${file.name}…`;
   try {
-    const result = await readSubtitleFile(file);
-    if (looksBinary(result.text)) throw new Error("文件看起来是二进制内容，不是文本字幕");
+    const result = await extractSource(file);
     $("raw-subtitles").value = result.text;
     state.version += 1;
     state.sourceName = file.name;
+    state.sourceKind = result.kind;
     if (!applyParsed(result.text, result.hint)) {
-      $("import-status").textContent = `无法解析 ${file.name}：内容不是 SRT / VTT / TXT`;
+      $("import-status").textContent = `无法解析 ${file.name}（.${result.ext}）：内容不是可识别的字幕或文本`;
       return;
     }
     state.provenance = buildProvenance({
@@ -848,7 +1098,40 @@ function saveConfig() {
   const id = llm.saveConfig(collectConfig());
   llm.setActiveConfig(id);
   refreshConfigList(id);
+  renderModelOptions();
   return id;
+}
+
+/** 配置弹窗里的「拉取列表」：用表单当前值请求，不必先保存。 */
+async function fetchModelsInConfig() {
+  const button = $("fetch-models");
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "获取中…";
+  try {
+    const config = collectConfig();
+    const models = await llm.listModels({ config });
+    const list = $("cfg-model-options");
+    list.replaceChildren(
+      ...models.map((item) => {
+        const option = document.createElement("option");
+        option.value = item.id;
+        return option;
+      }),
+    );
+    writeModelCache(config.id, models.map((item) => item.id));
+    renderModelOptions(models.map((item) => item.id));
+    setNotice("config-message", `已获取 ${models.length} 个模型，点击模型输入框可从下拉里选择。`, "success");
+  } catch (error) {
+    setNotice(
+      "config-message",
+      `拉取失败：${error.message}${error.detail ? `（${error.detail}）` : ""}。可直接手填模型名。`,
+      "error",
+    );
+  } finally {
+    button.textContent = original;
+    button.disabled = false;
+  }
 }
 
 function openConfig(message = "") {
@@ -937,11 +1220,25 @@ function bindEvents() {
     finishTask(snapshot, state.plan, Number($("segment-count").value));
   });
 
+  // 模型选择
+  $("model-select").addEventListener("change", (event) => selectModel(event.target.value));
+  $("refresh-models").addEventListener("click", () => refreshModels());
+
   // 输出
+  $("view-source").addEventListener("click", () => setOutputView("source"));
+  $("view-preview").addEventListener("click", () => setOutputView("preview"));
+  $("export-document").addEventListener("click", exportDocument);
   $("translation-output").addEventListener("input", () => {
     const core = getCore();
     $("output-stats").textContent = `${core.utf8ByteLen($("translation-output").value)} 字节`;
     syncButtons();
+  });
+  $("export-format").addEventListener("change", () => {
+    const format = $("export-format").value;
+    $("export-status").textContent =
+      format === "pdf"
+        ? "PDF 通过浏览器打印生成：会打开排版视图，在打印对话框选择「另存为 PDF」即可。"
+        : `将导出 ${format.toUpperCase()} 文档，排版与「预览（Markdown）」一致。`;
   });
   $("export-srt").addEventListener("click", () => exportAs("srt"));
   $("export-vtt").addEventListener("click", () => exportAs("vtt"));
@@ -1032,6 +1329,7 @@ function bindEvents() {
   $("config-list").addEventListener("change", (event) => {
     llm.setActiveConfig(event.target.value);
     loadConfigForm(llm.getActiveConfig());
+    renderModelOptions();
   });
   $("new-config").addEventListener("click", () => {
     const config = { ...llm.getActiveConfig(), id: `cfg_${Date.now()}`, name: "新配置", apiKey: "" };
@@ -1056,6 +1354,7 @@ function bindEvents() {
       setNotice("config-message", error.message, "error");
     }
   });
+  $("fetch-models").addEventListener("click", fetchModelsInConfig);
   $("test-config").addEventListener("click", async () => {
     const button = $("test-config");
     button.disabled = true;
@@ -1118,6 +1417,7 @@ async function boot() {
     hide("back-link");
   }
 
+  renderModelOptions();
   renderDocStats();
   syncButtons();
   setPill("translation-status", "就绪");

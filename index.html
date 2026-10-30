@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
 <meta name="media-api-base" content="">
+<!-- 版本号由 scripts/version.mjs 写入，页面徽章与发布日志读同一份，避免"站点写 0.1、包是 0.2" -->
+<meta name="app-version" content="0.3.0">
 <meta name="description" content="YouTube Media Studio：字幕导入、编辑、分段翻译与导出的本地工作台">
 <title>YouTube Media Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
@@ -35,9 +37,10 @@
     </div>
 
     <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="拖入或选择字幕文件">
-      <p class="drop-title">把 .srt / .vtt / .txt 拖到这里</p>
-      <p class="hint">或点此选择文件。支持 UTF-8、UTF-16、GBK 编码，自动转成 UTF-8。</p>
-      <input id="file-input" type="file" accept=".srt,.vtt,.txt,text/plain" hidden>
+      <p class="drop-title">把字幕或文档拖到这里</p>
+      <p class="hint">SRT / VTT / ASS / SSA / LRC / TXT / MD / HTML / DOCX / PDF 等。自动识别 UTF-8、UTF-16、GBK 编码。</p>
+      <input id="file-input" type="file" hidden
+        accept=".srt,.vtt,.ass,.ssa,.lrc,.txt,.text,.md,.markdown,.html,.htm,.json,.csv,.tsv,.xml,.docx,.pdf,text/*">
     </div>
 
     <div id="source-warnings" class="notice hidden" role="status"></div>
@@ -93,7 +96,8 @@
 
       <div class="media-row">
         <label class="btn btn-secondary btn-file" for="sub-file">导入字幕文件</label>
-        <input id="sub-file" class="sr-only" type="file" accept=".srt,.vtt,.txt,text/plain">
+        <input id="sub-file" class="sr-only" type="file"
+          accept=".srt,.vtt,.ass,.ssa,.lrc,.txt,.md,.markdown,.html,.htm,.json,.csv,.docx,.pdf,text/*">
         <button id="paste-toggle" class="btn btn-quiet" type="button" aria-expanded="false" aria-controls="paste-box">粘贴字幕文本</button>
       </div>
       <p id="import-status" class="hint">SRT / VTT / TXT 均在本地解析，不需要服务端</p>
@@ -142,6 +146,10 @@
     </div>
 
     <div class="toolbar">
+      <label class="field compact"><span>模型</span>
+        <select id="model-select"><option value="">配置默认</option></select>
+      </label>
+      <button id="refresh-models" class="btn btn-quiet" type="button" title="从当前接口拉取可用模型列表">刷新模型</button>
       <label class="field compact"><span>目标语言</span>
         <select id="target-lang">
           <option value="简体中文">简体中文</option>
@@ -159,24 +167,54 @@
       <button id="retry-translation" class="btn btn-secondary" type="button" disabled>重试失败段</button>
     </div>
 
+    <p id="model-hint" class="hint">同一 API 有多个模型时，点「刷新模型」拉取列表后可直接切换。</p>
+
+    <details class="instruction-block">
+      <summary>翻译要求（可选，追加到每次请求）</summary>
+      <textarea id="extra-instruction" rows="3" spellcheck="false"
+        placeholder="例如：术语保留英文原文；人名不译；语气书面；表格与链接保持原样；专有名词首次出现附中文。"></textarea>
+      <p class="hint">只影响本次翻译，不改动配置里的 System Prompt。留空则使用默认规则。</p>
+    </details>
+
     <p id="plan-summary" class="hint">载入字幕后显示分段计划。</p>
     <ol id="progress-list" class="progress-list"></ol>
 
+    <details id="live-block" class="live-block hidden">
+      <summary>模型实时输出 <span id="live-meta" class="hint"></span></summary>
+      <pre id="live-output" class="live-output" aria-live="polite"></pre>
+    </details>
+
     <div class="field">
       <div class="field-heading">
-        <label for="translation-output">译文（可直接编辑）</label>
+        <label for="translation-output">译文</label>
+        <div class="view-switch" role="tablist" aria-label="译文视图">
+          <button id="view-source" type="button" role="tab" aria-selected="true" class="is-active">结构（可编辑）</button>
+          <button id="view-preview" type="button" role="tab" aria-selected="false">预览（Markdown）</button>
+        </div>
         <span id="output-stats" class="hint">—</span>
       </div>
       <textarea id="translation-output" class="editor output" spellcheck="false"
         placeholder="翻译完成后在这里显示，可直接修改后再导出。"></textarea>
+      <div id="translation-preview" class="markdown-body hidden" role="tabpanel" aria-label="译文 Markdown 预览"></div>
+      <p id="preview-note" class="hint hidden">预览按 Markdown 渲染：表格、链接、代码块按格式显示。导出的 MD / HTML / DOCX / PDF 与这里一致。</p>
     </div>
 
     <div class="row export-row">
-      <button id="export-srt" class="btn btn-secondary" type="button" disabled>导出 SRT</button>
-      <button id="export-vtt" class="btn btn-secondary" type="button" disabled>导出 VTT</button>
-      <button id="export-txt" class="btn btn-quiet" type="button" disabled>导出 TXT</button>
+      <button id="export-srt" class="btn btn-secondary" type="button" disabled>SRT</button>
+      <button id="export-vtt" class="btn btn-secondary" type="button" disabled>VTT</button>
+      <button id="export-txt" class="btn btn-secondary" type="button" disabled>TXT</button>
+      <label class="field compact export-format-field"><span>文档格式</span>
+        <select id="export-format">
+          <option value="md">Markdown (.md)</option>
+          <option value="html">HTML (.html)</option>
+          <option value="docx">Word (.docx)</option>
+          <option value="pdf">PDF（打印）</option>
+        </select>
+      </label>
+      <button id="export-document" class="btn btn-secondary" type="button" disabled>导出文档</button>
       <button id="copy-result" class="btn btn-quiet" type="button" disabled>复制全文</button>
     </div>
+    <p id="export-status" class="hint">字幕格式保留时间轴；文档格式按 Markdown 排版，适合阅读与分享。PDF 走浏览器打印，可另存为 PDF 文件。</p>
 
     <details class="context-block">
       <summary>辅助参考资料（TXT / MD / PDF / DOCX / 图片）</summary>
@@ -189,6 +227,7 @@
 
 <footer>
   <span id="core-note">Rust / WebAssembly · 独立子应用</span>
+  <span id="app-version" class="version-tag">v0.3.0</span>
   <a href="../../" id="back-link">返回主站</a>
 </footer>
 
@@ -210,7 +249,13 @@
 
     <div class="form-grid">
       <label class="field"><span>名称</span><input id="cfg-name" required></label>
-      <label class="field"><span>模型</span><input id="cfg-model" required placeholder="gpt-4o-mini"></label>
+      <div class="field"><span>默认模型</span>
+        <div class="row">
+          <input id="cfg-model" class="grow" list="cfg-model-options" required placeholder="gpt-4o-mini">
+          <button type="button" id="fetch-models" class="btn btn-quiet">拉取列表</button>
+        </div>
+        <datalist id="cfg-model-options"></datalist>
+      </div>
       <label class="field full"><span>Base URL</span><input id="cfg-base-url" type="url" required placeholder="https://api.openai.com/v1"></label>
       <label class="field full"><span>API Key</span>
         <div class="row">
