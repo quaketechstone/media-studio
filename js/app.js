@@ -29,6 +29,9 @@ import {
   notesFilename,
   buildDownloadCommand,
   describeFollowUp,
+  subtitleFilename,
+  saveTextFile,
+  describeSaveResult,
 } from "./youtube/index.js";
 import { extractFile, buildContextBlock, imageAttachments } from "./file_context.js";
 import { buildTranslationPrompt } from "./prompt.js";
@@ -246,6 +249,10 @@ function syncButtons() {
   const hasTimeline = Boolean(state.doc?.cues?.length);
   $("export-srt").disabled = !hasOutput || !hasTimeline;
   $("export-vtt").disabled = !hasOutput || !hasTimeline;
+  // 字幕原文文件：有内容就能存，与是否翻译过无关
+  $("save-source").disabled = !hasDoc;
+  $("save-source-row").hidden = !hasDoc;
+  if (!hasDoc) $("save-source-status").hidden = true;
 }
 
 // ---------------------------------------------------------------- 翻译
@@ -1014,6 +1021,54 @@ async function fetchSubtitles() {
   }
 }
 
+/**
+ * 保存**字幕原文**为文件。
+ *
+ * 这是移动端的主路径：iOS Safari 没有 showSaveFilePicker，对 blob: + <a download>
+ * 又常常变成"新标签打开一屏字"，所以交给系统分享面板（存到「文件」/ 微信）。
+ *
+ * 手势约束：从点击到这里不能有 await。下面的 serializeSubtitle 是同步的，
+ * saveTextFile 内部第一件事就是同步调用 share()，链条是完整的。
+ */
+async function saveSourceSubtitles() {
+  if (!state.doc) return;
+  const hasTimeline = Boolean(state.doc.cues?.length);
+  const format = hasTimeline ? "srt" : "txt";
+  let text = "";
+  try {
+    text = getCore().serializeSubtitles(state.doc, format);
+  } catch (error) {
+    // 文档类内容（无时间轴）没有 SRT 可序列化，直接说明而不是给个空文件
+    setNotice("source-warnings", `无法生成 ${format.toUpperCase()}：${error.message}`, "error");
+    return;
+  }
+  const track = (state.tracks || []).find((item) => item.id === $("track-select").value) || null;
+  // 导入的文件没有视频信息，用文件名当标题；直接带 .srt 会得到 a.srt.srt
+  const fallbackTitle =
+    state.sourceName && state.sourceName !== "subtitles" ? stemOf(state.sourceName) : "";
+  const filename = subtitleFilename({
+    title: state.video?.meta?.title || fallbackTitle,
+    videoId: state.video?.videoId || "",
+    lang: track?.lang || "",
+    ext: format,
+  });
+  const status = $("save-source-status");
+  const button = $("save-source");
+  button.disabled = true;
+  try {
+    const result = await saveTextFile({ text, filename, mime: MIME[format] });
+    status.hidden = false;
+    status.textContent = describeSaveResult(result, {
+      sizeText: formatBytes(new TextEncoder().encode(text).byteLength),
+    });
+  } catch (error) {
+    status.hidden = false;
+    status.textContent = `保存失败：${error.message}`;
+  } finally {
+    button.disabled = !state.doc;
+  }
+}
+
 async function downloadMedia() {
   if (!state.yt || !state.video) return;
   const mode = $("download-mode").value;
@@ -1466,6 +1521,7 @@ function bindEvents() {
     }
   });
   $("fetch-subtitles").addEventListener("click", fetchSubtitles);
+  $("save-source").addEventListener("click", saveSourceSubtitles);
   $("download-start").addEventListener("click", downloadMedia);
   $("download-mode").addEventListener("change", fillFormatOptions);
   $("download-cancel").addEventListener("click", () => state.downloadJob?.cancel());

@@ -59,6 +59,13 @@ import { NOTES_SCHEMA, buildNotes, serializeNotes, notesFilename, cuesForNotes, 
 import { openSink, pickerAvailable, sinkWarning, SinkError, BLOB_WARN_BYTES } from "./sink.js";
 import { SpeedMeter, formatEta } from "./speed.js";
 import { buildDownloadCommand, describeFollowUp, CommandError } from "./cli.js";
+import {
+  subtitleFilename,
+  saveTextFile,
+  canShareFiles,
+  describeSaveResult,
+  ShareError,
+} from "./share.js";
 import { MediaBackend, BackendError, emptyCapabilities } from "./backends/base.js";
 import { ExecutorBackend } from "./backends/executor_backend.js";
 import { CustomInstanceBackend, parseInstanceUrl, resolveSameOrigin } from "./backends/custom_instance_backend.js";
@@ -229,6 +236,12 @@ export {
   buildDownloadCommand,
   describeFollowUp,
   CommandError,
+  // 字幕文件导出：手机走系统分享，桌面走下载
+  subtitleFilename,
+  saveTextFile,
+  canShareFiles,
+  describeSaveResult,
+  ShareError,
   // 零后端能力：本地媒体、来源标注、笔记素材
   LocalMediaSession,
   MediaError,

@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#ffffff">
 <meta name="media-api-base" content="">
 <!-- 版本号由 scripts/version.mjs 写入，页面徽章与发布日志读同一份，避免"站点写 0.1、包是 0.2" -->
-<meta name="app-version" content="0.5.0">
+<meta name="app-version" content="0.6.0">
 <meta name="description" content="YouTube Media Studio：字幕导入、编辑、分段翻译与导出的本地工作台">
 <title>YouTube Media Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
@@ -125,6 +125,11 @@
           placeholder="粘贴 SRT / VTT 内容，或纯文本（无时间轴时按行分段）"></textarea>
         <button id="paste-apply" class="btn btn-secondary" type="button">解析并载入</button>
       </div>
+
+      <div class="media-row" id="save-source-row" hidden>
+        <button id="save-source" class="btn btn-secondary" type="button">保存字幕文件</button>
+      </div>
+      <p id="save-source-status" class="hint" hidden>手机上点按会打开系统分享面板，可存到「文件」或发到微信。</p>
 
       <div class="media-row" id="download-controls">
         <label class="field compact"><span>类型</span>
@@ -272,7 +277,7 @@
 
 <footer>
   <span id="core-note">Rust / WebAssembly · 独立子应用</span>
-  <span id="app-version" class="version-tag">v0.5.0</span>
+  <span id="app-version" class="version-tag">v0.6.0</span>
   <a href="../../" id="back-link">返回主站</a>
 </footer>
 
