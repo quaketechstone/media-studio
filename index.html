@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<meta name="media-api-base" content="">
+<meta name="description" content="YouTube Media Studio：字幕导入、编辑、分段翻译与导出的本地工作台">
+<title>YouTube Media Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">Y</span>
+    <div>
+      <strong>YouTube Media Studio</strong>
+      <small>字幕工作台 · 导入 / 编辑 / 分段翻译 / 导出</small>
+    </div>
+  </div>
+  <div class="top-actions">
+    <span id="core-badge" class="badge">核心初始化中</span>
+    <button class="btn btn-quiet" id="theme-toggle" type="button" aria-label="切换深浅色主题">主题</button>
+    <button class="btn btn-primary" id="open-config" type="button">LLM 配置</button>
+  </div>
+</header>
+
+<main class="container">
+  <!-- 01 字幕源 -->
+  <section class="card" aria-labelledby="source-title">
+    <div class="section-heading">
+      <div><span class="eyebrow">01 / SOURCE</span><h1 id="source-title">字幕源</h1></div>
+      <span id="doc-stats" class="pill">未载入</span>
+    </div>
+
+    <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="拖入或选择字幕文件">
+      <p class="drop-title">把 .srt / .vtt / .txt 拖到这里</p>
+      <p class="hint">或点此选择文件。支持 UTF-8、UTF-16、GBK 编码，自动转成 UTF-8。</p>
+      <input id="file-input" type="file" accept=".srt,.vtt,.txt,text/plain" hidden>
+    </div>
+
+    <div id="source-warnings" class="notice hidden" role="status"></div>
+
+    <div class="field">
+      <div class="field-heading">
+        <label for="raw-subtitles">字幕内容（可直接编辑）</label>
+        <span id="doc-format" class="hint">—</span>
+      </div>
+      <textarea id="raw-subtitles" class="editor" spellcheck="false"
+        placeholder="粘贴字幕，或从上方导入文件。"></textarea>
+    </div>
+
+    <details id="media-block" class="media-block" hidden>
+      <summary>从视频链接获取字幕（需要已配置 Media Executor）</summary>
+      <div id="mock-banner" class="notice warning hidden" role="status"></div>
+      <div class="row">
+        <input id="video-url" type="url" class="grow" placeholder="https://www.youtube.com/watch?v=..." autocomplete="url">
+        <button id="resolve-video" class="btn btn-primary" type="button">解析</button>
+      </div>
+      <p id="media-status" class="hint">尚未解析。</p>
+      <div id="media-error" class="notice error hidden" role="alert"></div>
+      <div class="row">
+        <label class="field grow"><span>字幕轨道</span>
+          <select id="track-select" disabled><option value="">先解析视频</option></select>
+        </label>
+        <button id="fetch-subtitles" class="btn btn-secondary" type="button" disabled>获取字幕</button>
+      </div>
+      <div class="row">
+        <label class="field grow"><span>媒体格式</span>
+          <select id="format-select" disabled><option value="">解析后可用</option></select>
+        </label>
+        <button id="download-video" class="btn btn-secondary" type="button" disabled>下载</button>
+        <button id="download-cancel" class="btn btn-quiet" type="button" disabled>取消下载</button>
+      </div>
+      <p id="download-status" class="hint"></p>
+    </details>
+  </section>
+
+  <!-- 02 翻译 -->
+  <section class="card" aria-labelledby="translate-title">
+    <div class="section-heading">
+      <div><span class="eyebrow">02 / TRANSLATION</span><h2 id="translate-title">分段翻译</h2></div>
+      <span id="translation-status" class="pill">就绪</span>
+    </div>
+
+    <div class="toolbar">
+      <label class="field compact"><span>目标语言</span>
+        <select id="target-lang">
+          <option value="简体中文">简体中文</option>
+          <option value="繁體中文">繁體中文</option>
+          <option value="English">English</option>
+          <option value="日本語">日本語</option>
+          <option value="한국어">한국어</option>
+        </select>
+      </label>
+      <label class="field compact"><span>分段数</span>
+        <select id="segment-count"><option value="3">3 段</option><option value="4">4 段</option><option value="5">5 段</option></select>
+      </label>
+      <button id="translate" class="btn btn-primary" type="button" disabled>开始翻译</button>
+      <button id="stop-translation" class="btn btn-danger" type="button" disabled>停止</button>
+      <button id="retry-translation" class="btn btn-secondary" type="button" disabled>重试失败段</button>
+    </div>
+
+    <p id="plan-summary" class="hint">载入字幕后显示分段计划。</p>
+    <ol id="progress-list" class="progress-list"></ol>
+
+    <div class="field">
+      <div class="field-heading">
+        <label for="translation-output">译文（可直接编辑）</label>
+        <span id="output-stats" class="hint">—</span>
+      </div>
+      <textarea id="translation-output" class="editor output" spellcheck="false"
+        placeholder="翻译完成后在这里显示，可直接修改后再导出。"></textarea>
+    </div>
+
+    <div class="row export-row">
+      <button id="export-srt" class="btn btn-secondary" type="button" disabled>导出 SRT</button>
+      <button id="export-vtt" class="btn btn-secondary" type="button" disabled>导出 VTT</button>
+      <button id="export-txt" class="btn btn-quiet" type="button" disabled>导出 TXT</button>
+      <button id="copy-result" class="btn btn-quiet" type="button" disabled>复制全文</button>
+    </div>
+
+    <details class="context-block">
+      <summary>辅助参考资料（TXT / MD / PDF / DOCX / 图片）</summary>
+      <input id="context-input" type="file" multiple accept=".txt,.md,.pdf,.docx,image/*">
+      <ul id="context-list" class="file-list"></ul>
+      <p id="context-status" class="hint">文件内容会随请求发送给当前配置的模型服务，请确认有权分享。</p>
+    </details>
+  </section>
+</main>
+
+<footer>
+  <span id="core-note">Rust / WebAssembly · 独立子应用</span>
+  <a href="../../" id="back-link">返回主站</a>
+</footer>
+
+<dialog id="config-dialog" class="config-dialog">
+  <form method="dialog" class="dialog-shell">
+    <div class="section-heading">
+      <div><span class="eyebrow">LLM</span><h2>模型配置</h2></div>
+      <button class="icon-btn" value="cancel" aria-label="关闭配置">✕</button>
+    </div>
+
+    <div class="field">
+      <span>配置档案</span>
+      <div class="row">
+        <select id="config-list" class="grow"></select>
+        <button type="button" id="new-config" class="btn btn-secondary">新建</button>
+        <button type="button" id="delete-config" class="btn btn-quiet">删除</button>
+      </div>
+    </div>
+
+    <div class="form-grid">
+      <label class="field"><span>名称</span><input id="cfg-name" required></label>
+      <label class="field"><span>模型</span><input id="cfg-model" required placeholder="gpt-4o-mini"></label>
+      <label class="field full"><span>Base URL</span><input id="cfg-base-url" type="url" required placeholder="https://api.openai.com/v1"></label>
+      <label class="field full"><span>API Key</span>
+        <div class="row">
+          <input id="cfg-api-key" type="password" autocomplete="off" class="grow" placeholder="sk-...">
+          <button type="button" id="toggle-key" class="btn btn-quiet">显示</button>
+        </div>
+      </label>
+      <label class="field"><span>Temperature</span><input id="cfg-temperature" type="number" min="0" max="2" step="0.1" value="0.3"></label>
+      <label class="field"><span>Max Tokens</span><input id="cfg-max-tokens" type="number" min="1" value="4096"></label>
+      <label class="field"><span>Timeout (ms)</span><input id="cfg-timeout" type="number" min="1000" value="60000"></label>
+      <label class="field checkbox-field"><input id="cfg-vision" type="checkbox"><span>模型支持视觉输入（图片）</span></label>
+      <label class="field full"><span>System Prompt</span><textarea id="cfg-system-prompt" rows="4"></textarea></label>
+    </div>
+
+    <p class="security-note">API Key 保存在当前浏览器 localStorage，不是安全保险箱：请勿在公用设备使用，导出配置不含密钥。</p>
+    <div id="config-message" class="notice hidden" role="status"></div>
+
+    <div class="dialog-actions">
+      <button type="button" id="test-config" class="btn btn-secondary">测试连接</button>
+      <button type="button" id="import-config" class="btn btn-quiet">导入配置</button>
+      <button type="button" id="export-config" class="btn btn-quiet">导出配置</button>
+      <button type="button" id="save-config" class="btn btn-primary">保存</button>
+      <input id="import-file" type="file" accept=".json" hidden>
+    </div>
+  </form>
+</dialog>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
