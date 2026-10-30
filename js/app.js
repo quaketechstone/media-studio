@@ -14,7 +14,9 @@ import { TranslationTask, TaskState } from "./task_runner.js";
 import {
   YouTubeService,
   formatDuration,
+  formatEta,
   saveBlob,
+  openSink,
   LocalMediaSession,
   probeMedia,
   describeMedia,
@@ -533,9 +535,14 @@ function previewMarkdown() {
 function renderPreview() {
   const box = $("translation-preview");
   if (!$("translation-output").value.trim()) {
-    box.innerHTML = '<p class="hint">还没有译文。翻译完成或手动输入后即可预览。</p>';
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "还没有译文。翻译完成或手动输入后即可预览。";
+    box.replaceChildren(empty);
     return;
   }
+  // 唯一允许写入 HTML 的地方：输入是 renderMarkdown 的产物——它先转义全部原文，
+  // 再拼自己生成的标签，且链接协议经过白名单。模型返回的原文不会以裸 HTML 进入 DOM。
   box.innerHTML = renderMarkdown(previewMarkdown());
 }
 
@@ -611,16 +618,47 @@ function readMetaBase() {
 // ---------------------------------------------------------------- 视频 / 字幕 / 下载
 
 /**
+ * 通道偏好只存在本机：这是"我连的是哪台服务器"的部署信息，不该跟着翻译配置走，
+ * 也不该被导出。地址不合法时保留用户输入但不切换，避免"切过去了却用不了"。
+ */
+const BACKEND_KEY = "yms.mediaBackend";
+const INSTANCE_KEY = "yms.customInstance";
+
+function readBackendPrefs() {
+  try {
+    return {
+      id: localStorage.getItem(BACKEND_KEY) === "custom" ? "custom" : "executor",
+      instanceUrl: localStorage.getItem(INSTANCE_KEY) || "",
+    };
+  } catch {
+    return { id: "executor", instanceUrl: "" };
+  }
+}
+
+function saveBackendPrefs(id, instanceUrl) {
+  try {
+    localStorage.setItem(BACKEND_KEY, id);
+    localStorage.setItem(INSTANCE_KEY, instanceUrl || "");
+  } catch {
+    /* 隐私模式下 localStorage 可能不可写；不影响本次会话 */
+  }
+}
+
+/**
  * 六项能力的真实状态。核心原则：**每一项单独判断，绝不用"需要执行器"一句话
  * 把整块功能判死**。
  *
  *   预览 / 元数据 / 字幕导入 / 本地媒体 —— 纯前端，永远可用；
- *   在线字幕抓取 —— 需要执行器，没有就明说"不可用"，并指向导入入口；
- *   YouTube 视频下载 —— 官方播放器不提供文件接口，没有执行器就没有，
+ *   在线字幕抓取 —— 取决于当前通道，没有就明说"不可用"，并指向导入入口；
+ *   YouTube 视频下载 —— 官方播放器不提供文件接口，通道不支持就没有，
  *                        不用任何代理或解析手段假装可以。
+ *
+ * 通道声明为 false 的能力，操作控件直接隐藏（而不是渲染出来再报错）；
+ * 说明文字仍然保留，保证用户知道"为什么没有"和"还有什么替代路径"。
  */
 function renderCapabilities(probe = null) {
   const caps = state.yt?.capabilities || { embed: true, metadata: true, subtitles: false, download: false };
+  const custom = state.yt?.backendId === "custom";
   setPill("cap-embed", "可用", "ok");
   setPill("cap-import", "可用", "ok");
   setPill("cap-local", "可用", "ok");
@@ -629,14 +667,16 @@ function renderCapabilities(probe = null) {
   else if (state.video?.metaError) setPill("cap-meta", "受限", "");
   else setPill("cap-meta", "待解析", "");
 
-  if (!caps.subtitles) setPill("cap-subs", "需要执行器", "");
-  else if (probe && !probe.ok) setPill("cap-subs", "执行器离线", "err");
+  if (!caps.subtitles) setPill("cap-subs", custom ? "需要实例" : "需要执行器", "");
+  else if (probe && !probe.ok) setPill("cap-subs", custom ? "实例离线" : "执行器离线", "err");
   else setPill("cap-subs", probe ? "已连接" : "已配置", "ok");
 
   if (!caps.download) setPill("cap-dl", "官方无接口", "");
-  else if (probe && !probe.ok) setPill("cap-dl", "执行器离线", "err");
+  else if (probe && !probe.ok) setPill("cap-dl", custom ? "实例离线" : "执行器离线", "err");
   else setPill("cap-dl", probe ? "已连接" : "已配置", "ok");
 
+  $("subs-controls").hidden = !caps.subtitles;
+  $("download-controls").hidden = !caps.download;
   $("track-select").disabled = !caps.subtitles;
   $("fetch-subtitles").disabled = !caps.subtitles;
 
@@ -644,29 +684,98 @@ function renderCapabilities(probe = null) {
   if (!state.video) {
     $("subs-status").textContent = caps.subtitles
       ? "解析视频后可选择在线字幕轨道。"
-      : "没有媒体执行器，在线字幕抓取不可用；下面的「导入字幕文件」「粘贴字幕文本」不依赖服务端，效果一样。";
+      : "当前通道不提供在线字幕；下面的「导入字幕文件」「粘贴字幕文本」不依赖服务端，效果一样。";
   }
   if (!caps.download && !state.video) {
     $("download-status").textContent =
-      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。没有执行器时请用下方的「导入本地视频 / 音频」。";
+      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。当前通道不支持下载时，请用下方的「导入本地视频 / 音频」。";
   }
+}
+
+/** 通道一句话说明。不同通道的能力边界不同，不能共用一句"已连接"。 */
+function renderBackendStatus(probe = null) {
+  const el = $("backend-status");
+  if (!state.yt) return;
+  const backend = state.yt.backend;
+  if (state.yt.backendId === "custom") {
+    if (!backend.configured) {
+      el.textContent = `自建实例未生效：${backend.reason || "地址不合法"}`;
+      return;
+    }
+    const stateText = !probe ? "待检测" : probe.ok ? "可用" : `不可用：${probe.reason}`;
+    el.textContent = `通道：自建实例 ${backend.baseUrl} · ${stateText}。该通道的能力取决于实例配置，字幕与视频都会经过这台服务器。`;
+    return;
+  }
+  if (!backend.configured) {
+    el.textContent = "通道：自建执行器（未配置地址）。配置 media-api-base 后可获取在线字幕与下载成品文件。";
+    return;
+  }
+  const stateText = !probe ? "待检测" : probe.ok ? `可用${probe.version ? ` · ${probe.version}` : ""}` : `不可用：${probe.reason}`;
+  el.textContent = `通道：自建执行器 ${backend.baseUrl} · ${stateText}`;
+}
+
+async function refreshProbe() {
+  const backend = state.yt?.backend;
+  if (!backend?.configured) {
+    renderCapabilities();
+    renderBackendStatus();
+    return null;
+  }
+  const probe = await state.yt.probe().catch((error) => ({ ok: false, reason: error?.message || "连接失败" }));
+  renderCapabilities(probe);
+  renderBackendStatus(probe);
+  return probe;
 }
 
 async function setupMedia() {
   const baseUrl = window.MEDIA_API_BASE || readMetaBase();
   // 令牌由部署方注入（<script>window.EXECUTOR_TOKEN = "..."</script>），界面不提供输入框
-  state.yt = new YouTubeService({ baseUrl, token: window.EXECUTOR_TOKEN || "" });
-  $("media-block").hidden = false;
-  renderCapabilities();
-
-  if (!baseUrl) return;
-  // 探测放在解析之后异步做，不阻塞首屏
-  state.yt.probe().then((probe) => {
-    renderCapabilities(probe);
-    if (!probe.ok) {
-      setNotice("media-error", `媒体执行器连接失败：${probe.reason}。字幕与下载暂不可用，预览不受影响。`, "warning");
-    }
+  const prefs = readBackendPrefs();
+  state.yt = new YouTubeService({
+    baseUrl,
+    token: window.EXECUTOR_TOKEN || "",
+    backendId: prefs.id,
+    instanceUrl: prefs.instanceUrl,
   });
+  $("media-block").hidden = false;
+  $("backend-select").value = state.yt.backendId;
+  $("custom-instance-url").value = prefs.instanceUrl;
+  $("custom-backend-box").classList.toggle("hidden", state.yt.backendId !== "custom");
+  renderCapabilities();
+  renderBackendStatus();
+
+  if (!state.yt.backend.configured) return;
+  // 探测放在解析之后异步做，不阻塞首屏
+  const probe = await refreshProbe();
+  if (probe && !probe.ok) {
+    setNotice(
+      "media-error",
+      `${state.yt.backendId === "custom" ? "自建实例" : "媒体执行器"}连接失败：${probe.reason}。字幕与下载暂不可用，预览不受影响。`,
+      "warning",
+    );
+  }
+}
+
+async function applyBackend(id, instanceUrl) {
+  if (!state.yt) return;
+  const trimmed = String(instanceUrl || "").trim();
+  const result = state.yt.setBackend(id, { instanceUrl: trimmed, pageProtocol: location.protocol });
+  if (!result.ok) {
+    $("backend-status").textContent = `未切换：${result.reason}`;
+    $("backend-select").value = state.yt.backendId;
+    return;
+  }
+  saveBackendPrefs(state.yt.backendId, trimmed);
+  $("backend-select").value = state.yt.backendId;
+  $("custom-instance-url").value = trimmed;
+  $("custom-backend-box").classList.toggle("hidden", state.yt.backendId !== "custom");
+  // 通道变了，之前那份轨道/格式清单已经不属于当前通道，必须清掉重取
+  state.tracks = [];
+  state.formats = [];
+  renderCapabilities();
+  renderBackendStatus();
+  await refreshProbe();
+  if (state.video) await loadTracksAndFormats();
 }
 
 function renderVideo(video) {
@@ -750,11 +859,11 @@ async function loadTracksAndFormats() {
 
   if (!state.yt?.capabilities.subtitles) {
     const select = $("track-select");
-    select.replaceChildren(new Option("需要执行器", ""));
+    select.replaceChildren(new Option(state.yt?.backendId === "custom" ? "需要配置实例" : "需要执行器", ""));
     select.disabled = true;
     $("fetch-subtitles").disabled = true;
     $("subs-status").textContent =
-      "在线字幕需要媒体执行器。也可以用下面的「导入字幕文件」或「粘贴字幕文本」直接载入，同样进入分段翻译流程。";
+      "当前通道不提供在线字幕。也可以用下面的「导入字幕文件」或「粘贴字幕文本」直接载入，同样进入分段翻译流程。";
   } else {
     try {
       const tracks = await state.yt.listTracks(video);
@@ -786,7 +895,7 @@ async function loadTracksAndFormats() {
 
   if (!state.yt?.capabilities.download) {
     $("download-status").textContent =
-      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。没有执行器时请用下方的「导入本地视频 / 音频」。";
+      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。当前通道不支持下载时，请用下方的「导入本地视频 / 音频」。";
     fillFormatOptions();
     return;
   }
@@ -834,13 +943,15 @@ async function fetchSubtitles() {
   try {
     const result = await state.yt.loadSubtitles(state.video, trackId);
     state.version += 1;
-    const ok = applyParsed(result.srt, "srt");
-    if (!ok) throw new Error("执行器返回的字幕无法解析为 SRT/VTT");
+    // 通道可能给 SRT 也可能给 VTT（实例默认发 VTT），按它声明的格式解析，
+    // 不强行当 SRT 读——那会把 VTT 的头部当成字幕正文。
+    const ok = applyParsed(result.text, result.format || "srt");
+    if (!ok) throw new Error("返回的字幕无法解析为 SRT/VTT");
     const track = state.tracks.find((t) => t.id === trackId);
     // 来源与时间轴一起记下来，笔记回看时能对回原视频
     state.provenance = buildProvenance({
       video: state.video,
-      via: "executor",
+      via: state.yt.backendId === "custom" ? "instance" : "executor",
       track: track ? `${track.name}（${track.kind === "auto" ? "自动生成" : "原生"}）` : trackId,
       cueCount: state.doc?.cues?.length ?? 0,
     });
@@ -862,32 +973,80 @@ async function downloadMedia() {
   const mode = $("download-mode").value;
   const formatId = $("format-select").value;
   const progress = $("download-progress");
+  const ext = mode === "audio" ? "m4a" : "mp4";
+  // 文件名先给一个可读的猜测；服务端返回 Content-Disposition 时以服务端为准
+  const guess = `${(state.video.meta?.title || state.video.videoId).replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)}.${ext}`;
+  const chosen = (state.formats || []).find((f) => f.id === formatId);
+  const totalBytes = Number(chosen?.filesize) || 0;
 
-  state.downloadJob = state.yt.createDownloadJob(state.video, { mode, formatId });
   $("download-start").disabled = true;
   $("download-cancel").disabled = false;
+
+  // 关键顺序：**先要落盘位置，再发请求**。
+  // showSaveFilePicker 需要用户手势，放在 await fetch 之后会因手势过期抛 SecurityError；
+  // 先问路径还有一个好处——用户在选择器里停留时，不必先把字节读进内存。
+  let sink;
+  try {
+    sink = await openSink({ filename: guess, totalBytes, mode });
+  } catch (error) {
+    $("download-start").disabled = false;
+    $("download-cancel").disabled = true;
+    $("download-status").textContent =
+      error.code === "canceled" ? "已取消保存位置选择，未开始下载。" : `无法准备保存位置：${error.message}`;
+    return;
+  }
+
   progress.hidden = false;
-  progress.value = 0;
+  // 准备阶段还不知道总大小，进度条必须是不确定态：给 value=0 会被读成"0%"，
+  // 而 0% 意味着"一点都没动"，与事实不符。
+  progress.removeAttribute("value");
+  if (sink.warn) $("download-status").textContent = `${sink.warn}。`;
 
   try {
+    state.downloadJob = state.yt.createDownloadJob(state.video, { mode, formatId });
     const result = await state.downloadJob.start({
-      onProgress: ({ phase, received, total }) => {
-        if (total > 0) {
+      sink,
+      onProgress: ({ phase, received, total, bytesPerSecond, etaSeconds }) => {
+        // 瞬时速度拿不到时显示 "—"，不显示 0：0 会被理解成"卡住了"
+        const speed =
+          bytesPerSecond == null
+            ? "速度 —"
+            : `${formatBytes(bytesPerSecond)}/s${etaSeconds ? ` · 剩余 ${formatEta(etaSeconds)}` : ""}`;
+        if (total > 0 && phase !== "preparing") {
           progress.value = Math.min(100, Math.round((received / total) * 100));
-          $("download-status").textContent = `${phaseLabel(phase)} ${formatBytes(received)} / ${formatBytes(total)}（${progress.value}%）`;
+          $("download-status").textContent = `${phaseLabel(phase)} ${formatBytes(received)} / ${formatBytes(total)}（${progress.value}%）· ${speed}`;
         } else {
-          $("download-status").textContent = `${phaseLabel(phase)} 已接收 ${formatBytes(received)}（总大小未知）`;
+          // 总大小未知（或还在准备）：保持不确定态，只说已接收多少
+          progress.removeAttribute("value");
+          $("download-status").textContent = `${phaseLabel(phase)} 已接收 ${formatBytes(received)}（总大小未知）· ${speed}`;
         }
       },
     });
-    const fallback = `${state.video.meta?.title || state.video.videoId}.${mode === "audio" ? "m4a" : "mp4"}`;
-    saveBlob(result.blob, result.filename || fallback);
     progress.value = 100;
-    $("download-status").textContent = `下载完成：${result.filename || fallback}（${formatBytes(result.blob.size)}）`;
+    const average =
+      result.averageBytesPerSecond > 0 ? ` · 平均 ${formatBytes(result.averageBytesPerSecond)}/s` : "";
+    if (result.saved?.kind === "fs") {
+      // 已经写进用户选的文件，不能再触发一次下载
+      $("download-status").textContent = `已保存：${result.saved.filename}（${formatBytes(result.saved.bytes)}）${average}`;
+    } else {
+      // 走 sink 时内容在 saved.blob 里，result.blob 为 null；两个来源都要认
+      const blob = result.blob || result.saved?.blob;
+      const name = result.filename || result.saved?.filename || guess;
+      if (!blob) throw new Error("下载结果缺少文件内容");
+      saveBlob(blob, name);
+      const warn = result.saved?.warn ? ` · ${result.saved.warn}` : "";
+      $("download-status").textContent = `下载完成：${name}（${formatBytes(result.saved?.bytes || blob.size || 0)}）${average}${warn}`;
+    }
   } catch (error) {
     progress.hidden = true;
+    // 任务没跑起来（建任务就失败）时，sink 还开着，必须显式收掉
+    try {
+      await sink.abort();
+    } catch {
+      /* 清理失败不覆盖原始错误 */
+    }
     $("download-status").textContent =
-      error.code === "canceled" ? "已取消下载" : `下载失败：${error.message}`;
+      error.code === "canceled" ? "已取消下载。" : `下载失败：${error.message}`;
   } finally {
     $("download-start").disabled = false;
     $("download-cancel").disabled = true;
@@ -1264,6 +1423,28 @@ function bindEvents() {
   $("download-start").addEventListener("click", downloadMedia);
   $("download-mode").addEventListener("change", fillFormatOptions);
   $("download-cancel").addEventListener("click", () => state.downloadJob?.cancel());
+
+  // 媒体通道：默认执行器；自定义实例必须显式保存并检测，不静默生效
+  $("backend-select").addEventListener("change", () => {
+    const id = $("backend-select").value;
+    $("custom-backend-box").classList.toggle("hidden", id !== "custom");
+    if (id === "executor") {
+      applyBackend("executor", "");
+    } else {
+      $("backend-status").textContent = "填写你自己部署的实例地址，然后点「保存并检测」。";
+    }
+  });
+  $("backend-apply").addEventListener("click", () =>
+    applyBackend($("backend-select").value, $("custom-instance-url").value),
+  );
+  $("custom-backend-save").addEventListener("click", () =>
+    applyBackend("custom", $("custom-instance-url").value),
+  );
+  $("custom-instance-url").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    applyBackend("custom", $("custom-instance-url").value);
+  });
 
   // 零后端路径：字幕文件 / 粘贴文本 / 本地媒体 / 笔记导出
   $("sub-file").addEventListener("change", (event) => {

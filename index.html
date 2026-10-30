@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#ffffff">
 <meta name="media-api-base" content="">
 <!-- 版本号由 scripts/version.mjs 写入，页面徽章与发布日志读同一份，避免"站点写 0.1、包是 0.2" -->
-<meta name="app-version" content="0.3.0">
+<meta name="app-version" content="0.4.0">
 <meta name="description" content="YouTube Media Studio：字幕导入、编辑、分段翻译与导出的本地工作台">
 <title>YouTube Media Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
@@ -74,6 +74,25 @@
         <li><span class="cap-name">本地媒体预览</span><span id="cap-local" class="pill ok">可用</span></li>
       </ul>
 
+      <div class="media-row" id="backend-row">
+        <label class="field grow"><span>媒体通道</span>
+          <select id="backend-select">
+            <option value="executor">自建执行器（默认）</option>
+            <option value="custom">自建 Invidious 实例（高级）</option>
+          </select>
+        </label>
+        <button id="backend-apply" class="btn btn-quiet" type="button">应用</button>
+      </div>
+      <div id="custom-backend-box" class="paste-box hidden">
+        <label class="field"><span>实例地址</span>
+          <input id="custom-instance-url" type="url" inputmode="url" spellcheck="false"
+            placeholder="https://invidious.example.com" autocomplete="url">
+        </label>
+        <p class="hint">只填写你自己部署的实例。字幕与视频都会经过该地址，请自行评估隐私与稳定性；公共实例不预置，也不推荐。</p>
+        <button id="custom-backend-save" class="btn btn-secondary" type="button">保存并检测</button>
+      </div>
+      <p id="backend-status" class="hint"></p>
+
       <div id="player-wrap" class="player-wrap hidden">
         <div id="player" class="player"></div>
         <div class="video-meta">
@@ -86,7 +105,7 @@
         </div>
       </div>
 
-      <div class="media-row">
+      <div class="media-row" id="subs-controls">
         <label class="field grow"><span>在线字幕轨道</span>
           <select id="track-select" disabled><option value="">先解析视频</option></select>
         </label>
@@ -107,7 +126,7 @@
         <button id="paste-apply" class="btn btn-secondary" type="button">解析并载入</button>
       </div>
 
-      <div class="media-row">
+      <div class="media-row" id="download-controls">
         <label class="field compact"><span>类型</span>
           <select id="download-mode">
             <option value="video">视频（MP4）</option>
@@ -227,7 +246,7 @@
 
 <footer>
   <span id="core-note">Rust / WebAssembly · 独立子应用</span>
-  <span id="app-version" class="version-tag">v0.3.0</span>
+  <span id="app-version" class="version-tag">v0.4.0</span>
   <a href="../../" id="back-link">返回主站</a>
 </footer>
 

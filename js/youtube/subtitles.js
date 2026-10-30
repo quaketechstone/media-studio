@@ -111,7 +111,10 @@ const MESSAGES = {
   upstream_blocked: "YouTube 拒绝了服务端请求（常见于机房 IP），需要更换出口或在本地运行执行器",
   upstream_unreachable: "执行器连不上 YouTube（网络不可达或被 DNS 拦截），请检查执行器所在机器的网络",
   unsupported: "执行器不支持这个视频的字幕格式",
-  not_configured: "尚未配置媒体执行器，无法获取字幕",
+  not_configured: "尚未配置媒体通道，无法获取字幕",
+  rate_limited: "请求过于频繁（对方正在限流），请稍后再试",
+  timeout: "请求超时：网络太慢或执行器没有响应",
+  unauthorized: "执行器拒绝了这个请求（令牌无效或权限不足）",
 };
 
 export function describeSubtitleError(code, fallback) {
@@ -146,7 +149,9 @@ export class ExecutorSubtitleClient {
         headers: this.#headers({ "Content-Type": "application/json", ...(init.headers || {}) }),
       });
     } catch (error) {
-      throw new SubtitlesError("无法连接媒体执行器，请检查服务是否在运行", "network", error?.message);
+      if (error?.name === "TimeoutError") throw new SubtitlesError(describeSubtitleError("timeout"), "timeout");
+      if (error?.name === "AbortError") throw new SubtitlesError("已取消", "canceled");
+      throw new SubtitlesError("无法连接媒体通道，请检查服务是否在运行", "network", error?.message);
     }
     let body = null;
     try {
@@ -155,7 +160,15 @@ export class ExecutorSubtitleClient {
       body = null;
     }
     if (!response.ok) {
-      const code = body?.code || (response.status === 404 ? "no_captions" : "http");
+      const fallbackCode =
+        response.status === 429
+          ? "rate_limited"
+          : response.status === 401 || response.status === 403
+            ? "unauthorized"
+            : response.status === 404
+              ? "no_captions"
+              : "http";
+      const code = body?.code || fallbackCode;
       throw new SubtitlesError(describeSubtitleError(code, body?.message), code, `HTTP ${response.status}`);
     }
     return body;

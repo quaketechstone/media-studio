@@ -1,8 +1,9 @@
 /**
  * 字幕来源的唯一真相。
  *
- * 产品里拿到字幕有三种方式，能力和可信度完全不同，必须各自标注、不许互相冒充：
+ * 产品里拿到字幕有四种方式，能力和可信度完全不同，必须各自标注、不许互相冒充：
  *   executor  执行器从 YouTube 在线抓取（需要后端；可能因为网络/权限失败）
+ *   instance  用户自建的 Invidious 兼容实例抓取（同样需要服务端，但换了一台）
  *   file      用户导入的本地字幕文件（纯前端；内容准确性由用户负责）
  *   paste     用户粘贴的文本（纯前端；同上）
  *
@@ -13,12 +14,14 @@
 
 export const SOURCE_LABELS = {
   executor: "YouTube 在线字幕",
+  instance: "自建实例字幕",
   file: "本地字幕文件",
   paste: "粘贴的文本",
 };
 
 export const SOURCE_HINTS = {
   executor: "由媒体执行器抓取，内容与视频时间轴一致",
+  instance: "由你配置的实例抓取，内容与视频时间轴一致",
   file: "由本地文件解析，时间轴以文件内容为准",
   paste: "由粘贴文本解析，时间轴以文本内容为准",
 };
@@ -50,7 +53,7 @@ export function buildProvenance({
     title: video?.meta?.title || null,
     url: video?.canonicalUrl || null,
     start: Number(video?.start || 0),
-    track: via === "executor" ? track || null : null,
+    track: via === "executor" || via === "instance" ? track || null : null,
     filename: via === "file" ? filename || null : null,
     cueCount: Number.isInteger(cueCount) ? cueCount : null,
     at: when.toISOString(),

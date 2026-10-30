@@ -6,10 +6,14 @@
  *   - metadata  标题/作者/封面（oEmbed，纯前端）
  *   - local     本地媒体导入与预览（objectURL，纯前端）
  *   - notes     笔记素材导出（纯前端）
- *   - subtitles / download（必须执行器，未配置时明确为 false）
+ *   - subtitles / download（取决于当前媒体通道，未配置时明确为 false）
  *
- * 零后端路径（local / notes / 字幕文件导入）与执行器路径互不依赖：前者失效不会
- * 影响后者，反之亦然。UI 应该逐项显示，而不是用一句"需要执行器"概括整块。
+ * 通道层（backends/）是 v0.4.0 抽出来的：默认走自建执行器，用户可在高级设置里
+ * 换成自己部署的 Invidious 兼容实例。两种通道实现同一个 MediaBackend 契约，
+ * UI 只读 capabilities，不关心背后是谁。
+ *
+ * 零后端路径（local / notes / 字幕文件导入）与通道无关：前者失效不会影响后者，
+ * 反之亦然。UI 应该逐项显示，而不是用一句"需要执行器"概括整块。
  */
 
 import { parseYouTubeUrl, tryParseYouTubeUrl, parseStartSeconds } from "./url.js";
@@ -52,26 +56,70 @@ import {
   provenanceCaveat,
 } from "./subtitle_source.js";
 import { NOTES_SCHEMA, buildNotes, serializeNotes, notesFilename, cuesForNotes, segmentsForNotes } from "./notes.js";
+import { openSink, pickerAvailable, sinkWarning, SinkError, BLOB_WARN_BYTES } from "./sink.js";
+import { SpeedMeter, formatEta } from "./speed.js";
+import { MediaBackend, BackendError, emptyCapabilities } from "./backends/base.js";
+import { ExecutorBackend } from "./backends/executor_backend.js";
+import { CustomInstanceBackend, parseInstanceUrl, resolveSameOrigin } from "./backends/custom_instance_backend.js";
 
 export class YouTubeService {
-  constructor({ baseUrl = "", token = "", fetchImpl } = {}) {
+  constructor({ baseUrl = "", token = "", fetchImpl, backendId = "executor", instanceUrl = "" } = {}) {
     this.baseUrl = String(baseUrl || "").replace(/\/+$/, "");
-    this.subtitles = new ExecutorSubtitleClient({ baseUrl: this.baseUrl, token, fetchImpl });
-    this.downloads = new ExecutorDownloadClient({ baseUrl: this.baseUrl, token, fetchImpl });
     this.fetchImpl = fetchImpl;
+    this.executor = new ExecutorBackend({ baseUrl: this.baseUrl, token, fetchImpl });
+    this.custom = null;
+    this.backendId = "executor";
     this.lastVideo = null;
+    this.lastTracks = [];
+
+    // 兼容旧字段：这两个客户端曾被 app.js 之外的代码直接引用
+    this.subtitles = this.executor.subtitles;
+    this.downloads = this.executor.downloads;
+
+    if (instanceUrl) this.setBackend(backendId, { instanceUrl });
   }
 
-  /** 能力矩阵：UI 据此决定显示"可用"还是"需要配置执行器"。 */
+  /** 当前生效的通道对象。永远返回 MediaBackend 的实现，不会返回 null。 */
+  get backend() {
+    if (this.backendId === "custom" && this.custom) return this.custom;
+    return this.executor;
+  }
+
+  /**
+   * 切通道。实例地址不合法时**不切换**并返回原因，避免出现"切过去了但用不了"
+   * 这种需要用户自己猜的状态。
+   */
+  setBackend(id, { instanceUrl = "", pageProtocol = "" } = {}) {
+    if (id === "custom") {
+      const parsed = parseInstanceUrl(instanceUrl, { pageProtocol });
+      if (!parsed.ok) return { ok: false, reason: parsed.reason };
+      this.custom = new CustomInstanceBackend({
+        baseUrl: parsed.url,
+        fetchImpl: this.fetchImpl,
+        pageProtocol,
+      });
+      this.backendId = "custom";
+      this.lastTracks = [];
+      return { ok: true, url: parsed.url };
+    }
+    this.backendId = "executor";
+    this.lastTracks = [];
+    return { ok: true };
+  }
+
+  /**
+   * 能力矩阵：UI 据此决定显示"可用"还是"需要配置"。
+   * 只有 subtitles / download 来自通道；零后端能力与环境无关，永远为 true。
+   */
   get capabilities() {
+    const caps = this.backend?.capabilities || emptyCapabilities();
     return {
       embed: true,
       metadata: true,
-      // 零后端能力：与环境无关，永远为 true
       local: true,
       notes: true,
-      subtitles: this.subtitles.configured,
-      download: this.downloads.configured,
+      subtitles: Boolean(caps.subtitles),
+      download: Boolean(caps.download),
     };
   }
 
@@ -104,23 +152,28 @@ export class YouTubeService {
   }
 
   async listTracks(video) {
-    return this.subtitles.listTracks({ videoId: video.videoId, url: video.canonicalUrl });
+    const tracks = await this.backend.listTracks({ videoId: video.videoId, url: video.canonicalUrl });
+    this.lastTracks = tracks;
+    return tracks;
   }
 
   async loadSubtitles(video, trackId) {
-    return this.subtitles.fetchAsSrt({
+    const track = (this.lastTracks || []).find((item) => item.id === trackId);
+    // 通道自己知道 id 的含义（执行器是轨道 id，实例是字幕地址）；这里只负责传
+    return this.backend.fetchSubtitle({
       videoId: video.videoId,
       url: video.canonicalUrl,
-      trackId,
+      trackId: track?.url || trackId,
+      track,
     });
   }
 
   async resolveFormats(video) {
-    return this.downloads.resolveFormats(video.canonicalUrl);
+    return this.backend.resolveFormats({ videoId: video.videoId, url: video.canonicalUrl });
   }
 
   createDownloadJob(video, { mode = "video", formatId = "", lang = "" } = {}) {
-    return new ExecutorDownloadJob(this.downloads, {
+    return this.backend.createJob({
       url: video.canonicalUrl,
       videoId: video.videoId,
       mode,
@@ -130,8 +183,7 @@ export class YouTubeService {
   }
 
   async probe() {
-    if (!this.baseUrl) return { ok: false, reason: "未配置 media-api-base" };
-    return probeExecutor(this.baseUrl, { fetchImpl: this.fetchImpl });
+    return this.backend.probe();
   }
 }
 
@@ -156,6 +208,22 @@ export {
   MetadataError,
   SubtitlesError,
   DownloadError,
+  // 通道层
+  MediaBackend,
+  BackendError,
+  emptyCapabilities,
+  ExecutorBackend,
+  CustomInstanceBackend,
+  parseInstanceUrl,
+  resolveSameOrigin,
+  // 落盘层
+  openSink,
+  pickerAvailable,
+  sinkWarning,
+  SinkError,
+  BLOB_WARN_BYTES,
+  SpeedMeter,
+  formatEta,
   // 零后端能力：本地媒体、来源标注、笔记素材
   LocalMediaSession,
   MediaError,
@@ -176,4 +244,7 @@ export {
   notesFilename,
   cuesForNotes,
   segmentsForNotes,
+  ExecutorSubtitleClient,
+  ExecutorDownloadClient,
+  ExecutorDownloadJob,
 };
