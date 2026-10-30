@@ -4,7 +4,7 @@
  * 职责边界：这里只做"把用户动作映射到核心/任务/模块调用并渲染状态"，
  * 解析、分段、合并、请求、重试全部在各自模块里，换 UI 不需要重写这些逻辑。
  */
-import { initCore, getCore } from "./core.js";
+import { initCore, getCore, getCoreInfo } from "./core.js";
 import { LLMModule, DEFAULT_SYSTEM_PROMPT } from "../lib/llm-module/index.js";
 import { readSubtitleFile, looksBinary, downloadText, suggestFilename } from "./subtitle_io.js";
 import { TranslationTask, TaskState } from "./task_runner.js";
@@ -12,6 +12,16 @@ import {
   YouTubeService,
   formatDuration,
   saveBlob,
+  LocalMediaSession,
+  probeMedia,
+  describeMedia,
+  compatibilityHint,
+  buildProvenance,
+  describeProvenance,
+  provenanceCaveat,
+  buildNotes,
+  serializeNotes,
+  notesFilename,
 } from "./youtube/index.js";
 import { extractFile, buildContextBlock, imageAttachments } from "./file_context.js";
 import { buildTranslationPrompt } from "./prompt.js";
@@ -33,6 +43,8 @@ const state = {
   formats: [],
   provenance: null,
   downloadJob: null,
+  localSession: null,
+  localMedia: null,
   context: [],
   sourceName: "subtitles",
 };
@@ -80,6 +92,7 @@ function renderDocStats() {
   if (!doc) {
     setPill("doc-stats", "未载入");
     $("doc-format").textContent = "—";
+    updateNotesButton();
     return;
   }
   const core = getCore();
@@ -94,6 +107,7 @@ function renderDocStats() {
   renderPlan(plan);
   const warnings = doc.warnings || [];
   setNotice("source-warnings", warnings.length ? warnings.join("\n") : "", "warning");
+  updateNotesButton();
 }
 
 function renderPlan(plan) {
@@ -347,38 +361,45 @@ function readMetaBase() {
 // ---------------------------------------------------------------- 视频 / 字幕 / 下载
 
 /**
- * 三种能力互相独立，这里是它们的状态汇总：
- *   预览、元数据 —— 纯前端，一定可用；
- *   字幕、下载   —— 需要执行器，没配就明确说"不可用"，绝不用 Mock 顶上。
+ * 六项能力的真实状态。核心原则：**每一项单独判断，绝不用"需要执行器"一句话
+ * 把整块功能判死**。
+ *
+ *   预览 / 元数据 / 字幕导入 / 本地媒体 —— 纯前端，永远可用；
+ *   在线字幕抓取 —— 需要执行器，没有就明说"不可用"，并指向导入入口；
+ *   YouTube 视频下载 —— 官方播放器不提供文件接口，没有执行器就没有，
+ *                        不用任何代理或解析手段假装可以。
  */
 function renderCapabilities(probe = null) {
   const caps = state.yt?.capabilities || { embed: true, metadata: true, subtitles: false, download: false };
   setPill("cap-embed", "可用", "ok");
+  setPill("cap-import", "可用", "ok");
+  setPill("cap-local", "可用", "ok");
 
   if (state.video?.meta) setPill("cap-meta", "已获取", "ok");
   else if (state.video?.metaError) setPill("cap-meta", "受限", "");
   else setPill("cap-meta", "待解析", "");
 
-  if (!caps.subtitles) {
-    setPill("cap-subs", "需要执行器", "");
-  } else if (probe && !probe.ok) {
-    setPill("cap-subs", `执行器离线`, "err");
-  } else {
-    setPill("cap-subs", probe ? "已连接" : "已配置", "ok");
-  }
+  if (!caps.subtitles) setPill("cap-subs", "需要执行器", "");
+  else if (probe && !probe.ok) setPill("cap-subs", "执行器离线", "err");
+  else setPill("cap-subs", probe ? "已连接" : "已配置", "ok");
 
-  if (!caps.download) {
-    setPill("cap-dl", "需要执行器", "");
-  } else if (probe && !probe.ok) {
-    setPill("cap-dl", "执行器离线", "err");
-  } else {
-    setPill("cap-dl", probe ? "已连接" : "已配置", "ok");
-  }
+  if (!caps.download) setPill("cap-dl", "官方无接口", "");
+  else if (probe && !probe.ok) setPill("cap-dl", "执行器离线", "err");
+  else setPill("cap-dl", probe ? "已连接" : "已配置", "ok");
 
-  const configured = caps.subtitles || caps.download;
-  $("subs-status").textContent = configured
-    ? $("subs-status").textContent
-    : "字幕与下载需要媒体执行器。启动方式见 executor/README.md，然后把地址填进 index.html 的 media-api-base。";
+  $("track-select").disabled = !caps.subtitles;
+  $("fetch-subtitles").disabled = !caps.subtitles;
+
+  // 只在还没有解析视频时写默认说明；解析后由具体动作接管，不覆盖用户看到的真实结果
+  if (!state.video) {
+    $("subs-status").textContent = caps.subtitles
+      ? "解析视频后可选择在线字幕轨道。"
+      : "没有媒体执行器，在线字幕抓取不可用；下面的「导入字幕文件」「粘贴字幕文本」不依赖服务端，效果一样。";
+  }
+  if (!caps.download && !state.video) {
+    $("download-status").textContent =
+      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。没有执行器时请用下方的「导入本地视频 / 音频」。";
+  }
 }
 
 async function setupMedia() {
@@ -464,6 +485,7 @@ async function resolveVideo() {
       );
     }
     renderCapabilities();
+    updateNotesButton();
     await loadTracksAndFormats();
   } catch (error) {
     setPill("media-status", "解析失败", "err");
@@ -474,16 +496,16 @@ async function resolveVideo() {
 }
 
 async function loadTracksAndFormats() {
-  if (!state.yt?.capabilities.subtitles && !state.yt?.capabilities.download) {
-    const select = $("track-select");
-    select.replaceChildren(new Option("需要媒体执行器", ""));
-    select.disabled = true;
-    fillFormatOptions();
-    return;
-  }
   const video = state.video;
 
-  if (state.yt.capabilities.subtitles) {
+  if (!state.yt?.capabilities.subtitles) {
+    const select = $("track-select");
+    select.replaceChildren(new Option("需要执行器", ""));
+    select.disabled = true;
+    $("fetch-subtitles").disabled = true;
+    $("subs-status").textContent =
+      "在线字幕需要媒体执行器。也可以用下面的「导入字幕文件」或「粘贴字幕文本」直接载入，同样进入分段翻译流程。";
+  } else {
     try {
       const tracks = await state.yt.listTracks(video);
       const select = $("track-select");
@@ -493,7 +515,7 @@ async function loadTracksAndFormats() {
         select.disabled = true;
         $("fetch-subtitles").disabled = true;
         $("subs-status").textContent =
-          "该视频没有可用字幕（原生字幕和自动生成字幕都没有）。这是视频本身的状态，不是加载失败。";
+          "该视频没有可用字幕（原生字幕和自动生成字幕都没有）。这是视频本身的状态，不是加载失败。若你手上有字幕文件，可以直接导入。";
       } else {
         select.add(new Option("选择字幕轨道", ""));
         tracks.forEach((track) => {
@@ -512,15 +534,19 @@ async function loadTracksAndFormats() {
     }
   }
 
-  if (state.yt.capabilities.download) {
-    try {
-      const info = await state.yt.resolveFormats(video);
-      state.formats = info.formats || [];
-      fillFormatOptions();
-      $("download-start").disabled = !state.formats.length;
-    } catch (error) {
-      $("download-status").textContent = error.message;
-    }
+  if (!state.yt?.capabilities.download) {
+    $("download-status").textContent =
+      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。没有执行器时请用下方的「导入本地视频 / 音频」。";
+    fillFormatOptions();
+    return;
+  }
+  try {
+    const info = await state.yt.resolveFormats(video);
+    state.formats = info.formats || [];
+    fillFormatOptions();
+    $("download-start").disabled = !state.formats.length;
+  } catch (error) {
+    $("download-status").textContent = error.message;
   }
 }
 
@@ -528,7 +554,7 @@ function fillFormatOptions() {
   const mode = $("download-mode").value;
   const select = $("format-select");
   if (!state.yt?.capabilities.download) {
-    select.replaceChildren(new Option("需要媒体执行器", ""));
+    select.replaceChildren(new Option("官方无下载接口", ""));
     select.disabled = true;
     $("download-start").disabled = true;
     return;
@@ -558,21 +584,21 @@ async function fetchSubtitles() {
   try {
     const result = await state.yt.loadSubtitles(state.video, trackId);
     state.version += 1;
-    applyParsed(result.srt, "srt");
+    const ok = applyParsed(result.srt, "srt");
+    if (!ok) throw new Error("执行器返回的字幕无法解析为 SRT/VTT");
     const track = state.tracks.find((t) => t.id === trackId);
     // 来源与时间轴一起记下来，笔记回看时能对回原视频
-    state.provenance = {
-      videoId: state.video.videoId,
-      title: state.video.meta?.title || "",
-      url: state.video.canonicalUrl,
-      start: state.video.start,
+    state.provenance = buildProvenance({
+      video: state.video,
+      via: "executor",
       track: track ? `${track.name}（${track.kind === "auto" ? "自动生成" : "原生"}）` : trackId,
-      fetchedAt: new Date().toISOString(),
-    };
+      cueCount: state.doc?.cues?.length ?? 0,
+    });
     state.sourceName = state.video.videoId;
-    $("subs-status").textContent = `已载入 ${result.cueCount ?? "?"} 条字幕 · ${
-      state.provenance.track
-    } · 来源 ${state.video.canonicalUrl}${state.video.start ? `（从 ${formatDuration(state.video.start)} 开始）` : ""}`;
+    $("subs-status").textContent = `已载入 ${describeProvenance(state.provenance)} · 来源 ${state.video.canonicalUrl}${
+      state.video.start ? `（从 ${formatDuration(state.video.start)} 开始）` : ""
+    }`;
+    updateNotesButton();
   } catch (error) {
     $("subs-status").textContent = `获取失败：${error.message}`;
     setNotice("media-error", error.message, "error");
@@ -617,6 +643,161 @@ async function downloadMedia() {
     $("download-cancel").disabled = true;
     state.downloadJob = null;
   }
+}
+
+// ---------------------------------------------------------------- 零后端闭环：导入 / 本地媒体 / 笔记素材
+
+/**
+ * 导入字幕文件。
+ *
+ * 走的是和主页拖放区**完全相同**的解析链路（readSubtitleFile → applyParsed →
+ * WASM 分段），区别只在来源标注：文件来源不会被记成"来自 YouTube"，
+ * 否则笔记回看时会把用户自己的文件错认成官方字幕。
+ */
+async function importSubtitleFile(file) {
+  if (!file) return;
+  $("import-status").textContent = `正在读取 ${file.name}…`;
+  try {
+    const result = await readSubtitleFile(file);
+    if (looksBinary(result.text)) throw new Error("文件看起来是二进制内容，不是文本字幕");
+    $("raw-subtitles").value = result.text;
+    state.version += 1;
+    state.sourceName = file.name;
+    if (!applyParsed(result.text, result.hint)) {
+      $("import-status").textContent = `无法解析 ${file.name}：内容不是 SRT / VTT / TXT`;
+      return;
+    }
+    state.provenance = buildProvenance({
+      video: state.video,
+      via: "file",
+      filename: file.name,
+      cueCount: state.doc?.cues?.length ?? 0,
+    });
+    $("import-status").textContent = `已载入 ${file.name}（${result.encoding}，${formatBytes(result.bytes)}）· ${
+      state.provenance.sourceLabel
+    } · ${provenanceCaveat(state.provenance)}`;
+  } catch (error) {
+    $("import-status").textContent = `读取失败：${error.message}`;
+  }
+}
+
+function applyPastedSubtitle() {
+  const text = $("paste-text").value;
+  if (!text.trim()) {
+    $("import-status").textContent = "粘贴框是空的";
+    return;
+  }
+  $("raw-subtitles").value = text;
+  state.version += 1;
+  if (!applyParsed(text, "")) {
+    $("import-status").textContent = "无法解析粘贴的内容：请确认是 SRT / VTT，或至少是纯文本";
+    return;
+  }
+  state.provenance = buildProvenance({
+    video: state.video,
+    via: "paste",
+    cueCount: state.doc?.cues?.length ?? 0,
+  });
+  // 纯文本没时间轴，必须在界面上说清楚，否则用户会以为时间轴丢了
+  const timeless = (state.doc?.cues || []).every((cue) => !cue.start);
+  $("import-status").textContent = `已载入粘贴内容 · ${describeProvenance(state.provenance)}${
+    timeless ? " · 无时间轴（纯文本，按行分段）" : ""
+  }`;
+}
+
+function setupLocalMedia() {
+  state.localSession = new LocalMediaSession();
+  $("local-file").addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    // 清空 value：否则再次选择同一个文件不会触发 change
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const { url, kind } = state.localSession.select(file);
+      state.localMedia = describeMedia(file);
+      renderLocalPreview(url, kind, file);
+    } catch (error) {
+      $("local-status").textContent = error.message;
+    }
+  });
+  $("local-clear").addEventListener("click", () => {
+    state.localSession.release();
+    state.localMedia = null;
+    $("local-preview").replaceChildren();
+    hide("local-preview");
+    $("local-clear").disabled = true;
+    $("local-status").textContent = "已移除，objectURL 已释放";
+  });
+}
+
+function renderLocalPreview(url, kind, file) {
+  const box = $("local-preview");
+  const el = document.createElement(kind === "audio" ? "audio" : "video");
+  el.className = "local-media";
+  el.controls = true;
+  el.preload = "metadata";
+  el.addEventListener("error", () => {
+    $("local-status").textContent =
+      "这个文件浏览器无法解码（容器或编码不支持），文件本身仍保留。可换 MP4(H.264) / WebM 再试。";
+  });
+  el.src = url;
+  box.replaceChildren(el);
+  box.classList.remove("hidden");
+  $("local-clear").disabled = false;
+
+  const base = `${file.name} · ${formatBytes(file.size)}`;
+  const hint = compatibilityHint(file);
+  $("local-status").textContent = hint ? `${base} · ${hint}` : base;
+  updateNotesButton();
+
+  // 时长/分辨率是增强信息：拿不到就不显示，不写"未知"占位
+  probeMedia(url, kind, { createElement: (tag) => document.createElement(tag) }).then((info) => {
+    if (!info) return;
+    const parts = [base];
+    if (info.duration) parts.push(formatDuration(info.duration));
+    if (info.width) parts.push(`${info.width}×${info.height}`);
+    $("local-status").textContent = parts.join(" · ");
+  });
+}
+
+function updateNotesButton() {
+  const cueCount = state.doc?.cues?.length || 0;
+  const parts = [
+    state.video ? "视频信息" : "",
+    cueCount ? `${cueCount} 条字幕` : "",
+    state.localMedia ? "本地媒体信息" : "",
+  ].filter(Boolean);
+  $("export-notes").disabled = parts.length === 0;
+  $("notes-status").textContent = parts.length
+    ? `将导出：${parts.join(" + ")}`
+    : "载入字幕后可导出：视频信息 + 时间轴 + 分段计划";
+}
+
+/** 导出笔记素材：这是给分段/翻译/摘要引擎吃的中间结构，不是最终笔记。 */
+function exportNotes() {
+  const core = getCore();
+  const doc = state.doc;
+  const sourceText = doc ? core.serializeSubtitles(doc, doc.format) : "";
+  // 译文条数与字幕不一致时宁可不带，也不能错位
+  const translatedCues = state.translated?.cues;
+  const translations =
+    doc && translatedCues?.length === doc.cues.length ? translatedCues.map((cue) => cue.text) : null;
+
+  const notes = buildNotes({
+    video: state.video,
+    provenance: state.provenance,
+    doc,
+    sourceText,
+    plan: state.plan,
+    translations,
+    localMedia: state.localMedia,
+    engine: getCoreInfo().engine,
+  });
+  const filename = notesFilename({ videoId: state.video?.videoId });
+  downloadText(serializeNotes(notes), filename, "application/json;charset=utf-8");
+  $("notes-status").textContent = `已导出 ${filename}${
+    notes.warnings.length ? ` · 注意：${notes.warnings.join("；")}` : ""
+  }`;
 }
 
 function phaseLabel(phase) {
@@ -786,6 +967,23 @@ function bindEvents() {
   $("download-start").addEventListener("click", downloadMedia);
   $("download-mode").addEventListener("change", fillFormatOptions);
   $("download-cancel").addEventListener("click", () => state.downloadJob?.cancel());
+
+  // 零后端路径：字幕文件 / 粘贴文本 / 本地媒体 / 笔记导出
+  $("sub-file").addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    importSubtitleFile(file);
+  });
+  $("paste-toggle").addEventListener("click", () => {
+    const box = $("paste-box");
+    const willOpen = box.classList.contains("hidden");
+    box.classList.toggle("hidden", !willOpen);
+    $("paste-toggle").setAttribute("aria-expanded", String(willOpen));
+    if (willOpen) $("paste-text").focus();
+  });
+  $("paste-apply").addEventListener("click", applyPastedSubtitle);
+  $("export-notes").addEventListener("click", exportNotes);
+  setupLocalMedia();
 
   // 参考资料
   $("context-input").addEventListener("change", async (event) => {

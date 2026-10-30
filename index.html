@@ -59,14 +59,16 @@
           placeholder="https://www.youtube.com/watch?v=... 或 https://youtu.be/..." autocomplete="url">
         <button id="resolve-video" class="btn btn-primary" type="button">解析</button>
       </div>
-      <p id="media-status" class="hint">粘贴视频链接后点「解析」。链接解析和预览不需要任何服务端。</p>
+      <p id="media-status" class="hint">粘贴视频链接后点「解析」。链接解析、预览、字幕导入都能纯前端完成，不需要任何服务端。</p>
       <div id="media-error" class="notice error hidden" role="alert"></div>
 
       <ul class="cap-list" aria-label="能力状态">
         <li><span class="cap-name">官方嵌入预览</span><span id="cap-embed" class="pill ok">可用</span></li>
-        <li><span class="cap-name">视频信息</span><span id="cap-meta" class="pill">待解析</span></li>
-        <li><span class="cap-name">字幕获取</span><span id="cap-subs" class="pill">检测中</span></li>
-        <li><span class="cap-name">视频 / 音频下载</span><span id="cap-dl" class="pill">检测中</span></li>
+        <li><span class="cap-name">视频信息（oEmbed）</span><span id="cap-meta" class="pill">待解析</span></li>
+        <li><span class="cap-name">在线字幕抓取</span><span id="cap-subs" class="pill">需要执行器</span></li>
+        <li><span class="cap-name">字幕文件导入</span><span id="cap-import" class="pill ok">可用</span></li>
+        <li><span class="cap-name">YouTube 视频下载</span><span id="cap-dl" class="pill">官方无接口</span></li>
+        <li><span class="cap-name">本地媒体预览</span><span id="cap-local" class="pill ok">可用</span></li>
       </ul>
 
       <div id="player-wrap" class="player-wrap hidden">
@@ -82,12 +84,24 @@
       </div>
 
       <div class="media-row">
-        <label class="field grow"><span>字幕轨道</span>
+        <label class="field grow"><span>在线字幕轨道</span>
           <select id="track-select" disabled><option value="">先解析视频</option></select>
         </label>
         <button id="fetch-subtitles" class="btn btn-secondary" type="button" disabled>载入到编辑器</button>
       </div>
       <p id="subs-status" class="hint"></p>
+
+      <div class="media-row">
+        <label class="btn btn-secondary btn-file" for="sub-file">导入字幕文件</label>
+        <input id="sub-file" class="sr-only" type="file" accept=".srt,.vtt,.txt,text/plain">
+        <button id="paste-toggle" class="btn btn-quiet" type="button" aria-expanded="false" aria-controls="paste-box">粘贴字幕文本</button>
+      </div>
+      <p id="import-status" class="hint">SRT / VTT / TXT 均在本地解析，不需要服务端</p>
+      <div id="paste-box" class="paste-box hidden">
+        <textarea id="paste-text" class="editor" rows="4" spellcheck="false"
+          placeholder="粘贴 SRT / VTT 内容，或纯文本（无时间轴时按行分段）"></textarea>
+        <button id="paste-apply" class="btn btn-secondary" type="button">解析并载入</button>
+      </div>
 
       <div class="media-row">
         <label class="field compact"><span>类型</span>
@@ -103,7 +117,20 @@
         <button id="download-cancel" class="btn btn-quiet" type="button" disabled>取消</button>
       </div>
       <progress id="download-progress" class="transfer" max="100" value="0" hidden></progress>
-      <p id="download-status" class="hint"></p>
+      <p id="download-status" class="hint">官方播放器不提供视频文件下载接口。此处的下载依赖自托管执行器；没有执行器时，请用下面的本地媒体导入。</p>
+
+      <div class="media-row">
+        <label class="btn btn-secondary btn-file" for="local-file">导入本地视频 / 音频</label>
+        <input id="local-file" class="sr-only" type="file" accept="video/*,audio/*">
+        <button id="local-clear" class="btn btn-quiet" type="button" disabled>移除</button>
+      </div>
+      <p id="local-status" class="hint">只读取你选择的本地文件，不上传、不联网</p>
+      <div id="local-preview" class="local-preview hidden"></div>
+
+      <div class="media-row">
+        <button id="export-notes" class="btn btn-secondary" type="button" disabled>导出笔记素材（JSON）</button>
+      </div>
+      <p id="notes-status" class="hint">载入字幕后可导出：视频信息 + 时间轴 + 分段计划</p>
     </details>
   </section>
 

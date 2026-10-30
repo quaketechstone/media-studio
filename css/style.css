@@ -403,6 +403,37 @@ textarea { resize: vertical; }
 }
 .media-row .btn { min-height: 44px; }
 
+/* 零后端路径：文件选择按钮、粘贴框、本地媒体预览 */
+
+/* 视觉隐藏但保留可聚焦/可点击：file input 需要 label 转发点击，display:none 在 iOS 上不稳 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* label 当按钮用：必须继承 .btn 的 44px，否则移动端难点到 */
+.btn-file { display: inline-flex; align-items: center; justify-content: center; }
+
+.paste-box { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.paste-box .editor { min-height: 96px; width: 100%; }
+.paste-box .btn { align-self: flex-start; }
+
+.local-preview { margin-top: 10px; }
+.local-preview .local-media {
+  width: 100%;
+  max-height: 360px;
+  border-radius: 10px;
+  background: #000;
+}
+.local-preview audio.local-media { height: 44px; background: var(--surface-2); }
+
 progress.transfer {
   display: block;
   width: 100%;
@@ -525,4 +556,10 @@ footer a:hover { color: var(--text); }
   .thumb { width: 100%; height: auto; aspect-ratio: 16 / 9; }
   .media-row { flex-direction: column; align-items: stretch; }
   .media-row .btn, .media-row .field { width: 100%; }
+}
+
+/* 移动端：btn-quiet 的关键问题是透明背景让全宽按钮看起来像一行灰字。
+   统一补回边框，与主按钮保持同样的块状观感。 */
+@media (max-width: 640px) {
+  .media-row .btn-quiet { border-color: var(--border); }
 }
