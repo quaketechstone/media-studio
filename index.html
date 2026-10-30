@@ -51,28 +51,58 @@
         placeholder="粘贴字幕，或从上方导入文件。"></textarea>
     </div>
 
-    <details id="media-block" class="media-block" hidden>
-      <summary>从视频链接获取字幕（需要已配置 Media Executor）</summary>
-      <div id="mock-banner" class="notice warning hidden" role="status"></div>
-      <div class="row">
-        <input id="video-url" type="url" class="grow" placeholder="https://www.youtube.com/watch?v=..." autocomplete="url">
+    <details id="media-block" class="media-block">
+      <summary>YouTube 视频：预览 / 字幕 / 下载</summary>
+
+      <div class="url-row">
+        <input id="video-url" type="url" class="grow" inputmode="url" autocapitalize="off" spellcheck="false"
+          placeholder="https://www.youtube.com/watch?v=... 或 https://youtu.be/..." autocomplete="url">
         <button id="resolve-video" class="btn btn-primary" type="button">解析</button>
       </div>
-      <p id="media-status" class="hint">尚未解析。</p>
+      <p id="media-status" class="hint">粘贴视频链接后点「解析」。链接解析和预览不需要任何服务端。</p>
       <div id="media-error" class="notice error hidden" role="alert"></div>
-      <div class="row">
+
+      <ul class="cap-list" aria-label="能力状态">
+        <li><span class="cap-name">官方嵌入预览</span><span id="cap-embed" class="pill ok">可用</span></li>
+        <li><span class="cap-name">视频信息</span><span id="cap-meta" class="pill">待解析</span></li>
+        <li><span class="cap-name">字幕获取</span><span id="cap-subs" class="pill">检测中</span></li>
+        <li><span class="cap-name">视频 / 音频下载</span><span id="cap-dl" class="pill">检测中</span></li>
+      </ul>
+
+      <div id="player-wrap" class="player-wrap hidden">
+        <div id="player" class="player"></div>
+        <div class="video-meta">
+          <img id="video-thumb" class="thumb" alt="" width="160" height="90" loading="lazy">
+          <div class="video-info">
+            <h3 id="video-title">—</h3>
+            <p id="video-sub" class="hint"></p>
+            <a id="video-link" class="link" href="#" target="_blank" rel="noopener noreferrer">在 YouTube 打开</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="media-row">
         <label class="field grow"><span>字幕轨道</span>
           <select id="track-select" disabled><option value="">先解析视频</option></select>
         </label>
-        <button id="fetch-subtitles" class="btn btn-secondary" type="button" disabled>获取字幕</button>
+        <button id="fetch-subtitles" class="btn btn-secondary" type="button" disabled>载入到编辑器</button>
       </div>
-      <div class="row">
-        <label class="field grow"><span>媒体格式</span>
+      <p id="subs-status" class="hint"></p>
+
+      <div class="media-row">
+        <label class="field compact"><span>类型</span>
+          <select id="download-mode">
+            <option value="video">视频（MP4）</option>
+            <option value="audio">音频（M4A）</option>
+          </select>
+        </label>
+        <label class="field grow"><span>质量</span>
           <select id="format-select" disabled><option value="">解析后可用</option></select>
         </label>
-        <button id="download-video" class="btn btn-secondary" type="button" disabled>下载</button>
-        <button id="download-cancel" class="btn btn-quiet" type="button" disabled>取消下载</button>
+        <button id="download-start" class="btn btn-secondary" type="button" disabled>下载</button>
+        <button id="download-cancel" class="btn btn-quiet" type="button" disabled>取消</button>
       </div>
+      <progress id="download-progress" class="transfer" max="100" value="0" hidden></progress>
       <p id="download-status" class="hint"></p>
     </details>
   </section>

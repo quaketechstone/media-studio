@@ -337,6 +337,87 @@ textarea { resize: vertical; }
 .media-block .row { margin-bottom: 10px; }
 .media-block .field.grow { margin-bottom: 0; }
 
+/* 视频面板：预览、能力状态、字幕、下载 */
+
+.url-row { display: flex; gap: 10px; margin-bottom: 8px; }
+.url-row input {
+  min-width: 0;
+  padding: 0 12px;
+  height: 44px; /* 移动端触控目标 */
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+.url-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.cap-list {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin: 12px 0;
+  padding: 0;
+  font-size: 13px;
+}
+.cap-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  min-height: 40px;
+}
+.cap-name { color: var(--muted); }
+
+.player-wrap { margin: 4px 0 12px; }
+.player {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+}
+.player .yt-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+
+.video-meta { display: flex; gap: 12px; margin-top: 10px; align-items: flex-start; }
+.thumb { width: 160px; height: 90px; object-fit: cover; border-radius: 8px; background: var(--surface-2); flex: none; }
+.video-info { min-width: 0; }
+.video-info h3 { margin: 0 0 4px; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
+.video-info .hint { margin: 0 0 6px; }
+.link { color: var(--accent); font-size: 13px; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+
+.media-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.media-row .btn { min-height: 44px; }
+
+progress.transfer {
+  display: block;
+  width: 100%;
+  height: 8px;
+  margin-top: 10px;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--border);
+}
+progress.transfer::-webkit-progress-bar { background: var(--border); }
+progress.transfer::-webkit-progress-value { background: var(--accent); }
+progress.transfer::-moz-progress-bar { background: var(--accent); }
+
 /* ---------------------------------------------------------------- 附件 */
 
 .context-block {
@@ -435,4 +516,13 @@ footer a:hover { color: var(--text); }
   .dialog-shell { padding: 16px; }
   .export-row { gap: 8px; }
   footer { flex-direction: column; align-items: flex-start; padding: 12px 14px 24px; }
+
+  /* 视频面板在窄屏上：输入框与按钮各占一行，能力状态单列 */
+  .url-row { flex-direction: column; }
+  .url-row .btn { width: 100%; }
+  .cap-list { grid-template-columns: 1fr; }
+  .video-meta { flex-direction: column; }
+  .thumb { width: 100%; height: auto; aspect-ratio: 16 / 9; }
+  .media-row { flex-direction: column; align-items: stretch; }
+  .media-row .btn, .media-row .field { width: 100%; }
 }
