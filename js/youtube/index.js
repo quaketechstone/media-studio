@@ -1,19 +1,17 @@
 /**
  * YouTube 能力的组合层。app.js 只跟这里打交道，不直接碰下面的实现模块。
  *
- * 能力分开暴露，任何一个都没有"用一个冒充另一个"的余地：
- *   - embed     官方嵌入预览（纯前端，一定能用）
- *   - metadata  标题/作者/封面（oEmbed，纯前端）
- *   - local     本地媒体导入与预览（objectURL，纯前端）
- *   - notes     笔记素材导出（纯前端）
- *   - subtitles / download（取决于当前媒体通道，未配置时明确为 false）
+ * v1.0.0 起，项目的定位是**字幕下载器**。能力分成两类：
+ *   - 零后端：embed / metadata / 字幕文件导入 / 粘贴 / 解析编辑 / 导出保存——永远可用
+ *   - 通道相关：subtitles（在线字幕抓取）——取决于当前媒体通道
+ *
+ * 视频与音频下载（含执行器的流式下载任务、sink 落盘、测速）已整体移除：
+ * 产品不再承诺"下载视频"，保留它的 UI 会误导用户，保留它的代码会让每个改动
+ * 都要考虑一条我们已经不做承诺的路径。详见 CHANGELOG 1.0.0 与 docs/GAPS.md。
  *
  * 通道层（backends/）是 v0.4.0 抽出来的：默认走自建执行器，用户可在高级设置里
  * 换成自己部署的 Invidious 兼容实例。两种通道实现同一个 MediaBackend 契约，
  * UI 只读 capabilities，不关心背后是谁。
- *
- * 零后端路径（local / notes / 字幕文件导入）与通道无关：前者失效不会影响后者，
- * 反之亦然。UI 应该逐项显示，而不是用一句"需要执行器"概括整块。
  */
 
 import { parseYouTubeUrl, tryParseYouTubeUrl, parseStartSeconds } from "./url.js";
@@ -29,26 +27,6 @@ import {
   describeSubtitleError,
 } from "./subtitles.js";
 import {
-  ExecutorDownloadClient,
-  ExecutorDownloadJob,
-  DownloadError,
-  DownloadPhase,
-  downloadStream,
-  filenameFromDisposition,
-  saveBlob,
-  describeDownloadError,
-} from "./download.js";
-import {
-  LocalMediaSession,
-  MediaError,
-  MAX_LOCAL_BYTES,
-  classifyMedia,
-  validateMedia,
-  describeMedia,
-  compatibilityHint,
-  probeMedia,
-} from "./local_media.js";
-import {
   SOURCE_LABELS,
   isKnownSource,
   buildProvenance,
@@ -56,12 +34,18 @@ import {
   provenanceCaveat,
 } from "./subtitle_source.js";
 import { NOTES_SCHEMA, buildNotes, serializeNotes, notesFilename, cuesForNotes, segmentsForNotes } from "./notes.js";
-import { openSink, pickerAvailable, sinkWarning, SinkError, BLOB_WARN_BYTES } from "./sink.js";
-import { SpeedMeter, formatEta } from "./speed.js";
-import { buildDownloadCommand, describeFollowUp, CommandError } from "./cli.js";
+import {
+  buildSubtitleCommand,
+  describeCommandResult,
+  CommandError,
+  SUBTITLE_SCOPES,
+  SUBTITLE_FORMATS,
+  DEFAULT_LANGS,
+} from "./cli.js";
 import {
   subtitleFilename,
   saveTextFile,
+  saveBinaryFile,
   canShareFiles,
   describeSaveResult,
   ShareError,
@@ -80,9 +64,8 @@ export class YouTubeService {
     this.lastVideo = null;
     this.lastTracks = [];
 
-    // 兼容旧字段：这两个客户端曾被 app.js 之外的代码直接引用
+    // 兼容旧字段：这个客户端曾被 app.js 之外的代码直接引用
     this.subtitles = this.executor.subtitles;
-    this.downloads = this.executor.downloads;
 
     if (instanceUrl) this.setBackend(backendId, { instanceUrl });
   }
@@ -117,17 +100,15 @@ export class YouTubeService {
 
   /**
    * 能力矩阵：UI 据此决定显示"可用"还是"需要配置"。
-   * 只有 subtitles / download 来自通道；零后端能力与环境无关，永远为 true。
+   * 只有 subtitles 来自通道；零后端能力与环境无关，永远为 true。
    */
   get capabilities() {
     const caps = this.backend?.capabilities || emptyCapabilities();
     return {
       embed: true,
       metadata: true,
-      local: true,
       notes: true,
       subtitles: Boolean(caps.subtitles),
-      download: Boolean(caps.download),
     };
   }
 
@@ -176,20 +157,6 @@ export class YouTubeService {
     });
   }
 
-  async resolveFormats(video) {
-    return this.backend.resolveFormats({ videoId: video.videoId, url: video.canonicalUrl });
-  }
-
-  createDownloadJob(video, { mode = "video", formatId = "", lang = "" } = {}) {
-    return this.backend.createJob({
-      url: video.canonicalUrl,
-      videoId: video.videoId,
-      mode,
-      formatId,
-      lang,
-    });
-  }
-
   async probe() {
     return this.backend.probe();
   }
@@ -207,15 +174,9 @@ export {
   parseJson3,
   cuesToSrt,
   mergeRollingCues,
-  downloadStream,
-  filenameFromDisposition,
-  saveBlob,
-  DownloadPhase,
-  describeDownloadError,
   describeSubtitleError,
   MetadataError,
   SubtitlesError,
-  DownloadError,
   // 通道层
   MediaBackend,
   BackendError,
@@ -224,33 +185,21 @@ export {
   CustomInstanceBackend,
   parseInstanceUrl,
   resolveSameOrigin,
-  // 落盘层
-  openSink,
-  pickerAvailable,
-  sinkWarning,
-  SinkError,
-  BLOB_WARN_BYTES,
-  SpeedMeter,
-  formatEta,
-  // 零后端：生成本机下载命令（不发任何请求）
-  buildDownloadCommand,
-  describeFollowUp,
+  // 零后端：生成本机字幕下载命令（--skip-download，不发任何请求）
+  buildSubtitleCommand,
+  describeCommandResult,
+  SUBTITLE_SCOPES,
+  SUBTITLE_FORMATS,
+  DEFAULT_LANGS,
   CommandError,
   // 字幕文件导出：手机走系统分享，桌面走下载
   subtitleFilename,
   saveTextFile,
+  saveBinaryFile,
   canShareFiles,
   describeSaveResult,
   ShareError,
-  // 零后端能力：本地媒体、来源标注、笔记素材
-  LocalMediaSession,
-  MediaError,
-  MAX_LOCAL_BYTES,
-  classifyMedia,
-  validateMedia,
-  describeMedia,
-  compatibilityHint,
-  probeMedia,
+  // 来源标注与笔记素材
   SOURCE_LABELS,
   isKnownSource,
   buildProvenance,
@@ -263,6 +212,4 @@ export {
   cuesForNotes,
   segmentsForNotes,
   ExecutorSubtitleClient,
-  ExecutorDownloadClient,
-  ExecutorDownloadJob,
 };

@@ -14,23 +14,17 @@ import { TranslationTask, TaskState } from "./task_runner.js";
 import {
   YouTubeService,
   formatDuration,
-  formatEta,
-  saveBlob,
-  openSink,
-  LocalMediaSession,
-  probeMedia,
-  describeMedia,
-  compatibilityHint,
   buildProvenance,
   describeProvenance,
   provenanceCaveat,
   buildNotes,
   serializeNotes,
   notesFilename,
-  buildDownloadCommand,
-  describeFollowUp,
+  buildSubtitleCommand,
+  describeCommandResult,
   subtitleFilename,
   saveTextFile,
+  saveBinaryFile,
   describeSaveResult,
 } from "./youtube/index.js";
 import { extractFile, buildContextBlock, imageAttachments } from "./file_context.js";
@@ -50,11 +44,7 @@ const state = {
   video: null,
   player: null,
   tracks: [],
-  formats: [],
   provenance: null,
-  downloadJob: null,
-  localSession: null,
-  localMedia: null,
   context: [],
   sourceName: "subtitles",
   sourceKind: "subtitle",
@@ -557,7 +547,7 @@ function renderPreview() {
 
 // ---------------------------------------------------------------- 文档格式导出
 
-function exportDocument() {
+async function exportDocument() {
   const text = $("translation-output").value;
   if (!text.trim()) return;
   const format = $("export-format").value;
@@ -587,11 +577,16 @@ function exportDocument() {
       return;
     }
     if (result.bytes) {
-      saveBlob(new Blob([result.bytes], { type: result.mime }), result.filename);
+      const saved = await saveBinaryFile({
+        blob: new Blob([result.bytes], { type: result.mime }),
+        filename: result.filename,
+        mime: result.mime,
+      });
+      $("export-status").textContent = describeSaveResult(saved);
     } else {
       downloadText(result.text, result.filename, result.mime);
+      $("export-status").textContent = `已导出 ${result.filename}`;
     }
-    $("export-status").textContent = `已导出 ${result.filename}`;
   } catch (error) {
     setNotice("source-warnings", `导出失败：${error.message}`, "error");
   }
@@ -657,20 +652,21 @@ function saveBackendPrefs(id, instanceUrl) {
  * 六项能力的真实状态。核心原则：**每一项单独判断，绝不用"需要执行器"一句话
  * 把整块功能判死**。
  *
- *   预览 / 元数据 / 字幕导入 / 本地媒体 —— 纯前端，永远可用；
- *   在线字幕抓取 —— 取决于当前通道，没有就明说"不可用"，并指向导入入口；
- *   YouTube 视频下载 —— 官方播放器不提供文件接口，通道不支持就没有，
- *                        不用任何代理或解析手段假装可以。
+ *   预览 / 元数据 / 字幕导入 —— 纯前端，永远可用；
+ *   在线字幕抓取 —— 取决于当前通道，没有就明说"不可用"，并指向导入入口。
+ *
+ * v1.0.0 起不再有任何视频 / 音频下载入口：官方播放器不提供文件接口，纯前端
+ * 也无法跨源读取媒体流，与其渲染一个点了会失败的按钮，不如明说边界并把用户
+ * 指向本地字幕 command 或字幕文件导入。
  *
  * 通道声明为 false 的能力，操作控件直接隐藏（而不是渲染出来再报错）；
  * 说明文字仍然保留，保证用户知道"为什么没有"和"还有什么替代路径"。
  */
 function renderCapabilities(probe = null) {
-  const caps = state.yt?.capabilities || { embed: true, metadata: true, subtitles: false, download: false };
+  const caps = state.yt?.capabilities || { embed: true, metadata: true, subtitles: false };
   const custom = state.yt?.backendId === "custom";
   setPill("cap-embed", "可用", "ok");
   setPill("cap-import", "可用", "ok");
-  setPill("cap-local", "可用", "ok");
 
   if (state.video?.meta) setPill("cap-meta", "已获取", "ok");
   else if (state.video?.metaError) setPill("cap-meta", "受限", "");
@@ -680,12 +676,7 @@ function renderCapabilities(probe = null) {
   else if (probe && !probe.ok) setPill("cap-subs", custom ? "实例离线" : "执行器离线", "err");
   else setPill("cap-subs", probe ? "已连接" : "已配置", "ok");
 
-  if (!caps.download) setPill("cap-dl", "官方无接口", "");
-  else if (probe && !probe.ok) setPill("cap-dl", custom ? "实例离线" : "执行器离线", "err");
-  else setPill("cap-dl", probe ? "已连接" : "已配置", "ok");
-
   $("subs-controls").hidden = !caps.subtitles;
-  $("download-controls").hidden = !caps.download;
   $("track-select").disabled = !caps.subtitles;
   $("fetch-subtitles").disabled = !caps.subtitles;
 
@@ -694,10 +685,6 @@ function renderCapabilities(probe = null) {
     $("subs-status").textContent = caps.subtitles
       ? "解析视频后可选择在线字幕轨道。"
       : "当前通道不提供在线字幕；下面的「导入字幕文件」「粘贴字幕文本」不依赖服务端，效果一样。";
-  }
-  if (!caps.download && !state.video) {
-    $("download-status").textContent =
-      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。当前通道不支持下载时，请用下方的「导入本地视频 / 音频」。";
   }
 }
 
@@ -845,12 +832,13 @@ function renderCliCommand(video = state.video) {
     button.disabled = true;
     return;
   }
-  const quality = $("cli-quality").value;
-  const subs = $("cli-subs").value;
+  const scope = $("cli-scope").value;
+  const format = $("cli-format").value;
   try {
-    box.textContent = buildDownloadCommand({ url: video.canonicalUrl, quality, subs });
+    const { command } = buildSubtitleCommand({ url: video.canonicalUrl, scope, format });
+    box.textContent = command;
     button.disabled = false;
-    $("cli-status").textContent = describeFollowUp({ subs });
+    $("cli-status").textContent = describeCommandResult({ format });
   } catch (error) {
     box.textContent = error.message;
     button.disabled = true;
@@ -945,44 +933,6 @@ async function loadTracksAndFormats() {
       setPill("cap-subs", "获取失败", "err");
     }
   }
-
-  if (!state.yt?.capabilities.download) {
-    $("download-status").textContent =
-      "官方播放器不提供视频文件下载接口，纯前端也无法跨源读取媒体流。当前通道不支持下载时，请用下方的「导入本地视频 / 音频」。";
-    fillFormatOptions();
-    return;
-  }
-  try {
-    const info = await state.yt.resolveFormats(video);
-    state.formats = info.formats || [];
-    fillFormatOptions();
-    $("download-start").disabled = !state.formats.length;
-  } catch (error) {
-    $("download-status").textContent = error.message;
-  }
-}
-
-function fillFormatOptions() {
-  const mode = $("download-mode").value;
-  const select = $("format-select");
-  if (!state.yt?.capabilities.download) {
-    select.replaceChildren(new Option("官方无下载接口", ""));
-    select.disabled = true;
-    $("download-start").disabled = true;
-    return;
-  }
-  const formats = (state.formats || []).filter((f) => f.kind === mode);
-  select.replaceChildren();
-  if (!formats.length) {
-    select.add(new Option(mode === "audio" ? "无独立音频流" : "无可用视频格式", ""));
-    select.disabled = true;
-    return;
-  }
-  formats.forEach((f) => {
-    const size = f.filesize ? ` · ${formatBytes(f.filesize)}` : "";
-    select.add(new Option(`${f.label} ${f.ext}${f.hasAudio ? "" : " · 无声"}${size}`, f.id));
-  });
-  select.disabled = false;
 }
 
 async function fetchSubtitles() {
@@ -1069,92 +1019,6 @@ async function saveSourceSubtitles() {
   }
 }
 
-async function downloadMedia() {
-  if (!state.yt || !state.video) return;
-  const mode = $("download-mode").value;
-  const formatId = $("format-select").value;
-  const progress = $("download-progress");
-  const ext = mode === "audio" ? "m4a" : "mp4";
-  // 文件名先给一个可读的猜测；服务端返回 Content-Disposition 时以服务端为准
-  const guess = `${(state.video.meta?.title || state.video.videoId).replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)}.${ext}`;
-  const chosen = (state.formats || []).find((f) => f.id === formatId);
-  const totalBytes = Number(chosen?.filesize) || 0;
-
-  $("download-start").disabled = true;
-  $("download-cancel").disabled = false;
-
-  // 关键顺序：**先要落盘位置，再发请求**。
-  // showSaveFilePicker 需要用户手势，放在 await fetch 之后会因手势过期抛 SecurityError；
-  // 先问路径还有一个好处——用户在选择器里停留时，不必先把字节读进内存。
-  let sink;
-  try {
-    sink = await openSink({ filename: guess, totalBytes, mode });
-  } catch (error) {
-    $("download-start").disabled = false;
-    $("download-cancel").disabled = true;
-    $("download-status").textContent =
-      error.code === "canceled" ? "已取消保存位置选择，未开始下载。" : `无法准备保存位置：${error.message}`;
-    return;
-  }
-
-  progress.hidden = false;
-  // 准备阶段还不知道总大小，进度条必须是不确定态：给 value=0 会被读成"0%"，
-  // 而 0% 意味着"一点都没动"，与事实不符。
-  progress.removeAttribute("value");
-  if (sink.warn) $("download-status").textContent = `${sink.warn}。`;
-
-  try {
-    state.downloadJob = state.yt.createDownloadJob(state.video, { mode, formatId });
-    const result = await state.downloadJob.start({
-      sink,
-      onProgress: ({ phase, received, total, bytesPerSecond, etaSeconds }) => {
-        // 瞬时速度拿不到时显示 "—"，不显示 0：0 会被理解成"卡住了"
-        const speed =
-          bytesPerSecond == null
-            ? "速度 —"
-            : `${formatBytes(bytesPerSecond)}/s${etaSeconds ? ` · 剩余 ${formatEta(etaSeconds)}` : ""}`;
-        if (total > 0 && phase !== "preparing") {
-          progress.value = Math.min(100, Math.round((received / total) * 100));
-          $("download-status").textContent = `${phaseLabel(phase)} ${formatBytes(received)} / ${formatBytes(total)}（${progress.value}%）· ${speed}`;
-        } else {
-          // 总大小未知（或还在准备）：保持不确定态，只说已接收多少
-          progress.removeAttribute("value");
-          $("download-status").textContent = `${phaseLabel(phase)} 已接收 ${formatBytes(received)}（总大小未知）· ${speed}`;
-        }
-      },
-    });
-    progress.value = 100;
-    const average =
-      result.averageBytesPerSecond > 0 ? ` · 平均 ${formatBytes(result.averageBytesPerSecond)}/s` : "";
-    if (result.saved?.kind === "fs") {
-      // 已经写进用户选的文件，不能再触发一次下载
-      $("download-status").textContent = `已保存：${result.saved.filename}（${formatBytes(result.saved.bytes)}）${average}`;
-    } else {
-      // 走 sink 时内容在 saved.blob 里，result.blob 为 null；两个来源都要认
-      const blob = result.blob || result.saved?.blob;
-      const name = result.filename || result.saved?.filename || guess;
-      if (!blob) throw new Error("下载结果缺少文件内容");
-      saveBlob(blob, name);
-      const warn = result.saved?.warn ? ` · ${result.saved.warn}` : "";
-      $("download-status").textContent = `下载完成：${name}（${formatBytes(result.saved?.bytes || blob.size || 0)}）${average}${warn}`;
-    }
-  } catch (error) {
-    progress.hidden = true;
-    // 任务没跑起来（建任务就失败）时，sink 还开着，必须显式收掉
-    try {
-      await sink.abort();
-    } catch {
-      /* 清理失败不覆盖原始错误 */
-    }
-    $("download-status").textContent =
-      error.code === "canceled" ? "已取消下载。" : `下载失败：${error.message}`;
-  } finally {
-    $("download-start").disabled = false;
-    $("download-cancel").disabled = true;
-    state.downloadJob = null;
-  }
-}
-
 // ---------------------------------------------------------------- 零后端闭环：导入 / 本地媒体 / 笔记素材
 
 /**
@@ -1215,67 +1079,11 @@ function applyPastedSubtitle() {
   }`;
 }
 
-function setupLocalMedia() {
-  state.localSession = new LocalMediaSession();
-  $("local-file").addEventListener("change", (event) => {
-    const file = event.target.files?.[0];
-    // 清空 value：否则再次选择同一个文件不会触发 change
-    event.target.value = "";
-    if (!file) return;
-    try {
-      const { url, kind } = state.localSession.select(file);
-      state.localMedia = describeMedia(file);
-      renderLocalPreview(url, kind, file);
-    } catch (error) {
-      $("local-status").textContent = error.message;
-    }
-  });
-  $("local-clear").addEventListener("click", () => {
-    state.localSession.release();
-    state.localMedia = null;
-    $("local-preview").replaceChildren();
-    hide("local-preview");
-    $("local-clear").disabled = true;
-    $("local-status").textContent = "已移除，objectURL 已释放";
-  });
-}
-
-function renderLocalPreview(url, kind, file) {
-  const box = $("local-preview");
-  const el = document.createElement(kind === "audio" ? "audio" : "video");
-  el.className = "local-media";
-  el.controls = true;
-  el.preload = "metadata";
-  el.addEventListener("error", () => {
-    $("local-status").textContent =
-      "这个文件浏览器无法解码（容器或编码不支持），文件本身仍保留。可换 MP4(H.264) / WebM 再试。";
-  });
-  el.src = url;
-  box.replaceChildren(el);
-  box.classList.remove("hidden");
-  $("local-clear").disabled = false;
-
-  const base = `${file.name} · ${formatBytes(file.size)}`;
-  const hint = compatibilityHint(file);
-  $("local-status").textContent = hint ? `${base} · ${hint}` : base;
-  updateNotesButton();
-
-  // 时长/分辨率是增强信息：拿不到就不显示，不写"未知"占位
-  probeMedia(url, kind, { createElement: (tag) => document.createElement(tag) }).then((info) => {
-    if (!info) return;
-    const parts = [base];
-    if (info.duration) parts.push(formatDuration(info.duration));
-    if (info.width) parts.push(`${info.width}×${info.height}`);
-    $("local-status").textContent = parts.join(" · ");
-  });
-}
-
 function updateNotesButton() {
   const cueCount = state.doc?.cues?.length || 0;
   const parts = [
     state.video ? "视频信息" : "",
     cueCount ? `${cueCount} 条字幕` : "",
-    state.localMedia ? "本地媒体信息" : "",
   ].filter(Boolean);
   $("export-notes").disabled = parts.length === 0;
   $("notes-status").textContent = parts.length
@@ -1300,7 +1108,6 @@ function exportNotes() {
     sourceText,
     plan: state.plan,
     translations,
-    localMedia: state.localMedia,
     engine: getCoreInfo().engine,
   });
   const filename = notesFilename({ videoId: state.video?.videoId });
@@ -1522,12 +1329,9 @@ function bindEvents() {
   });
   $("fetch-subtitles").addEventListener("click", fetchSubtitles);
   $("save-source").addEventListener("click", saveSourceSubtitles);
-  $("download-start").addEventListener("click", downloadMedia);
-  $("download-mode").addEventListener("change", fillFormatOptions);
-  $("download-cancel").addEventListener("click", () => state.downloadJob?.cancel());
-  // 零后端下载：只拼命令，任何选择变化都不发请求
-  $("cli-quality").addEventListener("change", () => renderCliCommand());
-  $("cli-subs").addEventListener("change", () => renderCliCommand());
+  // 零后端命令：只拼命令，任何选择变化都不发请求
+  $("cli-scope").addEventListener("change", () => renderCliCommand());
+  $("cli-format").addEventListener("change", () => renderCliCommand());
   $("cli-copy").addEventListener("click", copyCliCommand);
 
   // 媒体通道：默认执行器；自定义实例必须显式保存并检测，不静默生效
@@ -1567,7 +1371,6 @@ function bindEvents() {
   });
   $("paste-apply").addEventListener("click", applyPastedSubtitle);
   $("export-notes").addEventListener("click", exportNotes);
-  setupLocalMedia();
 
   // 参考资料
   $("context-input").addEventListener("change", async (event) => {

@@ -8,18 +8,17 @@
  *   - 该通道的能力完全取决于实例配置：有的实例关掉了字幕、有的不给直链、
  *     有的对 CORS 做了限制。所以每一项能力都要靠实测失败来暴露，不能假设。
  *
- * 安全约束（本文件的三条硬规则）：
+ * 安全约束（本文件的两条硬规则）：
  *   1. 所有返回的地址都要先归一成绝对 URL，再校验 origin 与本实例一致——
  *      否则实例被控时可以把请求指向任意域。
  *   2. 字幕正文只当文本处理，不拼 HTML（渲染在 app.js 用 textContent）。
- *   3. 不跟随到 googlevideo 直链：那条路没有 CORS 头，浏览器必然失败，
- *      失败的报错还会被误读成"网络问题"。统一走实例自身的 /latest_version 代理。
+ *
+ * v1.0.0 之前这里还有第三条规则（不经 googlevideo 直链下载视频），随视频下载一起移除。
  */
 
 import { MediaBackend, BackendError } from "./base.js";
 import { parseJson3, cuesToSrt } from "../subtitles.js";
-import { downloadStream, DownloadError } from "../download.js";
-import { withTimeout, mergeSignals } from "../net.js";
+import { withTimeout } from "../net.js";
 
 const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 
@@ -68,20 +67,6 @@ export function resolveSameOrigin(pathOrUrl, base) {
   return resolved.toString();
 }
 
-/** 从格式条目里取 itag；取不到就当不可下载，不猜一个。 */
-export function itagOf(format, base = "") {
-  if (format?.itag) return String(format.itag);
-  try {
-    const url = new URL(String(format?.url || ""), base || "https://example.invalid/");
-    const fromQuery = url.searchParams.get("itag");
-    if (fromQuery) return fromQuery;
-  } catch {
-    /* 落到正则兜底 */
-  }
-  const match = String(format?.url || "").match(/[?&]itag=(\d+)/);
-  return match ? match[1] : "";
-}
-
 const AUTO_LABEL_RE = /auto[\s-]?generated|自动生成|自動生成/i;
 
 export class CustomInstanceBackend extends MediaBackend {
@@ -103,7 +88,7 @@ export class CustomInstanceBackend extends MediaBackend {
     // 实例能不能做事，只有它自己知道；这里声明的是"本通道具备这条代码路径"，
     // 真实可用性由 probe() 与逐次请求的失败来暴露。
     const on = this.configured;
-    return { metadata: on, subtitles: on, formats: on, download: on };
+    return { metadata: on, subtitles: on };
   }
 
   async probe() {
@@ -206,87 +191,5 @@ export class CustomInstanceBackend extends MediaBackend {
       throw new BackendError("unsupported", "实例返回的内容不是 SRT/VTT 字幕");
     }
     return { text: raw, format, cueCount: null, lang: "", kind: "" };
-  }
-
-  async resolveFormats({ videoId }) {
-    const payload = await this.#video(videoId);
-    const muxed = Array.isArray(payload?.formatStreams) ? payload.formatStreams : [];
-    const adaptive = Array.isArray(payload?.adaptiveFormats) ? payload.adaptiveFormats : [];
-    const entries = [
-      ...muxed.map((format) => ({ format, muxed: true })),
-      ...adaptive.map((format) => ({ format, muxed: false })),
-    ];
-    const seen = new Set();
-    const formats = [];
-    for (const { format, muxed: isMuxed } of entries) {
-      const itag = itagOf(format, this.baseUrl);
-      if (!itag) continue; // 没有 itag 就没法走 /latest_version，宁可不列
-      const type = String(format.type || "");
-      const kind = type.startsWith("audio") ? "audio" : "video";
-      const key = `${itag}:${kind}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const ext = format.container || type.split("/")[1]?.split(";")[0] || "mp4";
-      formats.push({
-        id: itag,
-        label: format.qualityLabel || format.resolution || (kind === "audio" ? "音频" : itag),
-        ext,
-        kind,
-        // formatStreams 是音视频合一的；adaptive 视频流通常无声，必须如实标注
-        hasAudio: kind === "audio" ? true : isMuxed || type.includes("audio"),
-        filesize: Number(format.contentLength || format.size) || 0,
-      });
-    }
-    // 视频优先、有音轨优先、大分辨率优先——与执行器通道的排序保持一致
-    formats.sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === "video" ? -1 : 1;
-      if (a.hasAudio !== b.hasAudio) return a.hasAudio ? -1 : 1;
-      return parseInt(b.label, 10) - parseInt(a.label, 10) || 0;
-    });
-    return { formats, videoId, title: payload?.title || "", duration: Number(payload?.lengthSeconds) || 0 };
-  }
-
-  createJob({ videoId, mode = "video", formatId = "" }) {
-    if (!this.configured) throw new BackendError("not_configured", this.reason || "未配置实例地址");
-    if (!formatId) throw new BackendError("bad_format", "没有选择格式");
-    return new InstanceDownloadJob(this, { videoId, itag: formatId, mode });
-  }
-
-  /** 只走实例自身的代理端点：直连 googlevideo 会被 CORS 拦，且失败信息具有误导性。 */
-  streamUrl(videoId, itag) {
-    const params = new URLSearchParams({ id: videoId, itag, local: "true" });
-    return `${this.baseUrl}/latest_version?${params}`;
-  }
-}
-
-export class InstanceDownloadJob {
-  constructor(backend, { videoId, itag, mode = "video" }) {
-    this.backend = backend;
-    this.videoId = videoId;
-    this.itag = itag;
-    this.mode = mode;
-    this.controller = new AbortController();
-    this.jobId = `instance:${videoId}:${itag}`;
-  }
-
-  async start({ onProgress, signal, sink } = {}) {
-    const merged = mergeSignals(this.controller.signal, signal);
-    const filename = `${this.videoId}-${this.itag}.${this.mode === "audio" ? "m4a" : "mp4"}`;
-    try {
-      const result = await downloadStream(this.backend.streamUrl(this.videoId, this.itag), {
-        fetchImpl: this.backend.fetchImpl,
-        signal: merged,
-        sink,
-        onProgress,
-      });
-      return { ...result, filename: result.filename || filename, jobId: this.jobId };
-    } catch (error) {
-      if (error instanceof DownloadError) throw error;
-      throw new DownloadError("下载失败", "failed", error?.message);
-    }
-  }
-
-  async cancel() {
-    this.controller.abort();
   }
 }

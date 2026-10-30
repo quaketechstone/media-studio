@@ -6,8 +6,8 @@
 <meta name="theme-color" content="#ffffff">
 <meta name="media-api-base" content="">
 <!-- 版本号由 scripts/version.mjs 写入，页面徽章与发布日志读同一份，避免"站点写 0.1、包是 0.2" -->
-<meta name="app-version" content="0.6.0">
-<meta name="description" content="YouTube Media Studio：字幕导入、编辑、分段翻译与导出的本地工作台">
+<meta name="app-version" content="1.0.0">
+<meta name="description" content="YouTube Media Studio：字幕抓取、编辑、分段翻译与下载/导出的本地工作台">
 <title>YouTube Media Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="./css/style.css">
@@ -18,7 +18,7 @@
     <span class="brand-mark">Y</span>
     <div>
       <strong>YouTube Media Studio</strong>
-      <small>字幕工作台 · 导入 / 编辑 / 分段翻译 / 导出</small>
+      <small>字幕工作台 · 抓取 / 编辑 / 分段翻译 / 下载导出</small>
     </div>
   </div>
   <div class="top-actions">
@@ -55,7 +55,7 @@
     </div>
 
     <details id="media-block" class="media-block">
-      <summary>YouTube 视频：预览 / 字幕 / 下载</summary>
+      <summary>YouTube 视频：预览 / 字幕</summary>
 
       <div class="url-row">
         <input id="video-url" type="url" class="grow" inputmode="url" autocapitalize="off" spellcheck="false"
@@ -70,8 +70,6 @@
         <li><span class="cap-name">视频信息（oEmbed）</span><span id="cap-meta" class="pill">待解析</span></li>
         <li><span class="cap-name">在线字幕抓取</span><span id="cap-subs" class="pill">需要执行器</span></li>
         <li><span class="cap-name">字幕文件导入</span><span id="cap-import" class="pill ok">可用</span></li>
-        <li><span class="cap-name">YouTube 视频下载</span><span id="cap-dl" class="pill">官方无接口</span></li>
-        <li><span class="cap-name">本地媒体预览</span><span id="cap-local" class="pill ok">可用</span></li>
       </ul>
 
       <div class="media-row" id="backend-row">
@@ -88,7 +86,7 @@
           <input id="custom-instance-url" type="url" inputmode="url" spellcheck="false"
             placeholder="https://invidious.example.com" autocomplete="url">
         </label>
-        <p class="hint">只填写你自己部署的实例。字幕与视频都会经过该地址，请自行评估隐私与稳定性；公共实例不预置，也不推荐。</p>
+        <p class="hint">只填写你自己部署的实例。字幕会经过该地址，请自行评估隐私与稳定性；公共实例不预置，也不推荐。</p>
         <button id="custom-backend-save" class="btn btn-secondary" type="button">保存并检测</button>
       </div>
       <p id="backend-status" class="hint"></p>
@@ -131,55 +129,29 @@
       </div>
       <p id="save-source-status" class="hint" hidden>手机上点按会打开系统分享面板，可存到「文件」或发到微信。</p>
 
-      <div class="media-row" id="download-controls">
-        <label class="field compact"><span>类型</span>
-          <select id="download-mode">
-            <option value="video">视频（MP4）</option>
-            <option value="audio">音频（M4A）</option>
-          </select>
-        </label>
-        <label class="field grow"><span>质量</span>
-          <select id="format-select" disabled><option value="">解析后可用</option></select>
-        </label>
-        <button id="download-start" class="btn btn-secondary" type="button" disabled>下载</button>
-        <button id="download-cancel" class="btn btn-quiet" type="button" disabled>取消</button>
-      </div>
-      <progress id="download-progress" class="transfer" max="100" value="0" hidden></progress>
-      <p id="download-status" class="hint">官方播放器不提供视频文件下载接口。此处的下载依赖自托管执行器；没有执行器时，请用下面的本地媒体导入。</p>
-
       <details id="cli-block" class="cli-block">
-        <summary>方式二：在你自己的电脑上下载（零后端，网页不发任何请求）</summary>
+        <summary>方式二：在你自己的电脑上下载字幕（零后端，网页不发任何请求）</summary>
         <div class="cli-body">
           <div class="media-row">
-            <label class="field compact"><span>清晰度</span>
-              <select id="cli-quality">
-                <option value="best">最佳画质</option>
-                <option value="1080">≤ 1080p</option>
-                <option value="720">≤ 720p</option>
-                <option value="audio">仅音频</option>
+            <label class="field compact"><span>取哪些轨道</span>
+              <select id="cli-scope">
+                <option value="manual">只要原生字幕</option>
+                <option value="auto">原生优先，没有就用自动生成</option>
+                <option value="all">全部语言（含自动生成）</option>
               </select>
             </label>
-            <label class="field compact"><span>字幕</span>
-              <select id="cli-subs">
-                <option value="manual">原生字幕</option>
-                <option value="auto">含自动生成</option>
-                <option value="none">不要字幕</option>
+            <label class="field compact"><span>落盘格式</span>
+              <select id="cli-format">
+                <option value="vtt">VTT（原样，不需 ffmpeg）</option>
+                <option value="srt">SRT（需 ffmpeg 转换）</option>
               </select>
             </label>
             <button id="cli-copy" class="btn btn-secondary" type="button" disabled>复制命令</button>
           </div>
           <pre id="cli-command" class="cli-command">先在上面粘贴并解析视频链接</pre>
-          <p id="cli-status" class="hint">命令只在你自己的终端执行。需要先安装 yt-dlp（pip install -U yt-dlp，或下载单文件二进制）。</p>
+          <p id="cli-status" class="hint">命令只在你自己的终端执行。需要先安装 yt-dlp（pip install -U yt-dlp）。只下载字幕不需要 ffmpeg，也不需要合并音视频轨；下载完把文件拖回上面的「导入字幕文件」即可校对。</p>
         </div>
       </details>
-
-      <div class="media-row">
-        <label class="btn btn-secondary btn-file" for="local-file">导入本地视频 / 音频</label>
-        <input id="local-file" class="sr-only" type="file" accept="video/*,audio/*">
-        <button id="local-clear" class="btn btn-quiet" type="button" disabled>移除</button>
-      </div>
-      <p id="local-status" class="hint">只读取你选择的本地文件，不上传、不联网</p>
-      <div id="local-preview" class="local-preview hidden"></div>
 
       <div class="media-row">
         <button id="export-notes" class="btn btn-secondary" type="button" disabled>导出笔记素材（JSON）</button>
@@ -277,7 +249,7 @@
 
 <footer>
   <span id="core-note">Rust / WebAssembly · 独立子应用</span>
-  <span id="app-version" class="version-tag">v0.6.0</span>
+  <span id="app-version" class="version-tag">v1.0.0</span>
   <a href="../../" id="back-link">返回主站</a>
 </footer>
 

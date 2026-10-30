@@ -174,6 +174,64 @@ export async function saveTextFile({
   return { via: "none", filename, bytes };
 }
 
+/**
+ * 保存二进制 Blob（HTML / PDF 等导出产物）。
+ *
+ * 与 saveTextFile 同源：桌面走 <a download>，手机走系统分享面板，
+ * 且如实返回走了哪一级，不许统一说成"已保存"。导出文档是二进制，
+ * 不能用纯文本那份 tryShare 路径——它构造的是 File([text])，这里改成 File([blob])。
+ *
+ * @returns {Promise<{via:"share"|"download"|"none"|"canceled", filename:string, bytes:number}>}
+ */
+export async function saveBinaryFile({ blob, filename = "file", mime = "application/octet-stream", scope = globalThis } = {}) {
+  const bytes = blob?.size || 0;
+  const FileCtor = scope?.File || globalThis.File;
+  const shareReady = canShareFiles(scope);
+  const shareFirst = prefersShare(scope);
+
+  const tryShareBin = async () => {
+    if (!shareReady || typeof FileCtor !== "function") return false;
+    try {
+      await scope.navigator.share({ files: [new FileCtor([blob], filename, { type: mime })], title: filename });
+      return true;
+    } catch (error) {
+      // 用户在分享面板点取消，是他不想存，不是失败；也不能顺手降级去下载
+      if (error?.name === "AbortError") return "canceled";
+      return false;
+    }
+  };
+  const useDownload = () => {
+    const doc = scope?.document;
+    const urlApi = scope.URL || globalThis.URL;
+    if (!doc || !urlApi?.createObjectURL) return false;
+    const url = urlApi.createObjectURL(blob);
+    const anchor = doc.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.rel = "noopener";
+    doc.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    // 立刻 revoke 会让部分浏览器来不及取字节，1 秒后回收
+    setTimeout(() => urlApi.revokeObjectURL(url), 1000)?.unref?.();
+    return true;
+  };
+
+  const order = shareFirst ? ["share", "download"] : ["download", "share"];
+  for (const step of order) {
+    if (step === "share") {
+      const r = await tryShareBin();
+      if (r === true) return { via: "share", filename, bytes };
+      if (r === "canceled") return { via: "canceled", filename, bytes };
+      continue; // 分享失败就继续往下走，不能让用户白点一次
+    }
+    if (step === "download") {
+      if (useDownload()) return { via: "download", filename, bytes };
+    }
+  }
+  return { via: "none", filename, bytes };
+}
+
 /** 保存结果 → 一句人话。文案要区分"存到哪了"，否则用户不知道下一步去哪找。 */
 export function describeSaveResult(result, { sizeText = "" } = {}) {
   const name = result?.filename || "字幕文件";
